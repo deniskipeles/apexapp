@@ -1,0 +1,54 @@
+name: Build Windows App on Linux
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Cache Cargo registry to speed up build
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Cache the Windows SDK download (xwin) to save massive time
+      - name: Cache XWin SDK
+        id: cache-xwin
+        uses: actions/cache@v4
+        with:
+          path: ./xwin
+          key: ${{ runner.os }}-xwin-sdk
+
+      - name: Run Build Script
+        env:
+          # If apex-kit is PUBLIC, secrets.GITHUB_TOKEN is fine.
+          # If apex-kit is PRIVATE, you need a PAT (Personal Access Token) stored in secrets.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+        run: |
+          chmod +x setup_and_build.sh
+          ./setup_and_build.sh
+
+      - name: Upload Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Installer
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
