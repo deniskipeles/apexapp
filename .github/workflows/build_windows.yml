@@ -42,7 +42,7 @@ jobs:
         env:
           # If apex-kit is PUBLIC, secrets.GITHUB_TOKEN is fine.
           # If apex-kit is PRIVATE, you need a PAT (Personal Access Token) stored in secrets.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          GH_TOKEN: ${{ secrets.MY_PAT_TOKEN }} 
         run: |
           chmod +x setup_and_build.sh
           ./setup_and_build.sh

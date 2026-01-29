@@ -39,7 +39,7 @@ EOF
 # ==========================================
 # 5. DOWNLOAD SPECIFIC GITHUB ARTIFACT
 # ==========================================
-SIDECAR_NAME="my-sidecar" # <--- NAME IN TAURI.CONF.JSON (externalBin)
+SIDECAR_NAME="my-sidecar" 
 ARTIFACT_ID="5243988330"
 REPO_OWNER="deniskipeles"
 REPO_NAME="apex-kit"
@@ -48,28 +48,41 @@ TARGET_DIR="src-tauri/binaries"
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-pc-windows-msvc.exe"
 mkdir -p "$TARGET_DIR"
 
-echo "📥 Downloading Sidecar Artifact ID: $ARTIFACT_ID..."
-
-# Check for Token
 AUTH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
-if [ -z "$AUTH_TOKEN" ]; then
-    echo "❌ Error: GH_TOKEN or GITHUB_TOKEN is missing. Cannot download artifact."
-    exit 1
-fi
 
-# Download ZIP from GitHub API
-curl -L \
+echo "📥 Downloading Sidecar Artifact ID: $ARTIFACT_ID from $REPO_OWNER/$REPO_NAME..."
+
+# 1. Download the file
+HTTP_CODE=$(curl -L -w "%{http_code}" \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $AUTH_TOKEN" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/artifacts/$ARTIFACT_ID/zip" \
-  -o sidecar_temp.zip
+  -o sidecar_temp.zip)
 
-# Unzip and Move
+# 2. Check HTTP Status
+if [ "$HTTP_CODE" -ne 200 ]; then
+    echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
+    echo "⚠️ Content of response:"
+    cat sidecar_temp.zip
+    echo ""
+    echo "👉 TIP: If Status is 404, the Artifact ID is expired or wrong."
+    echo "👉 TIP: If Status is 401/403, your Token cannot access the other repo."
+    exit 1
+fi
+
+# 3. Check File Size (JSON errors are small, Real Zips are big)
+FILE_SIZE=$(wc -c < sidecar_temp.zip)
+if [ "$FILE_SIZE" -lt 1000 ]; then
+    echo "❌ Error: File is too small ($FILE_SIZE bytes). It is likely a JSON error, not a ZIP."
+    cat sidecar_temp.zip
+    exit 1
+fi
+
+# 4. Unzip
 echo "📂 Extracting Sidecar..."
 unzip -o sidecar_temp.zip -d extracted_sidecar
 
-# Find the .exe in the extracted folder (regardless of what it was named originally)
 FOUND_EXE=$(find extracted_sidecar -name "*.exe" | head -n 1)
 
 if [ -f "$FOUND_EXE" ]; then
