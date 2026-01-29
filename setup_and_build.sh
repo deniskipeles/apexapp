@@ -101,8 +101,9 @@ fi
 # 6. Download Microsoft SDKs
 echo "📥 Downloading Microsoft Windows SDKs..."
 mkdir -p xwin
-# FIX: Remove invalid flag, use 'yes' pipe to auto-accept any prompts
-yes | xwin splat --output ./xwin
+
+# FIX: Send the full word "yes" to satisfy the prompt
+yes yes | xwin splat --output ./xwin
 
 # 7. Build
 npm install
