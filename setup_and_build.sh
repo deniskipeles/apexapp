@@ -40,7 +40,7 @@ EOF
 # 5. DOWNLOAD SPECIFIC GITHUB ARTIFACT
 # ==========================================
 SIDECAR_NAME="apexkit" 
-ARTIFACT_ID="5243988330"
+ARTIFACT_ID="5303189688"
 REPO_OWNER="deniskipeles"
 REPO_NAME="apex-kit"
 
