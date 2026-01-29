@@ -2,42 +2,84 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>ApexApp</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <div class="app-container">
+      
+      <!-- TOP NAVIGATION BAR -->
+      <header class="navbar">
+        <div class="brand">
+          <img src="/src/assets/tauri.svg" alt="Logo" style="height: 24px;">
+          <span>ApexApp</span>
+        </div>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/src/assets/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
-        <a href="https://www.typescriptlang.org/docs" target="_blank">
-          <img
-            src="/src/assets/typescript.svg"
-            class="logo typescript"
-            alt="typescript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+        <div class="nav-links">
+          <button id="nav-home" class="nav-btn active">Home</button>
+          <button id="nav-app" class="nav-btn">App</button>
+          <button id="nav-dash" class="nav-btn">Dashboard</button>
+        </div>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
+        <div class="server-controls">
+          <!-- TOGGLE SWITCH -->
+          <label style="display: flex; align-items: center; gap: 5px; font-size: 0.8rem; cursor: pointer; margin-right: 15px; user-select: none;">
+            <input type="checkbox" id="window-mode-toggle">
+            <span style="color: #555;">New Window Mode</span>
+          </label>
+
+          <div style="display: flex; align-items: center; gap: 5px;">
+            <span id="status-dot" class="status-indicator"></span>
+            <span id="status-text">Stopped</span>
+          </div>
+          <button id="server-btn" class="btn-primary">Start Server</button>
+        </div>
+      </header>
+
+      <!-- MAIN CONTENT AREA -->
+      <main class="content-area">
+
+        <!-- VIEW 1: HOME -->
+        <div id="view-home" class="view active">
+          <div class="home-center">
+            <h1>Welcome to ApexApp</h1>
+            <p>Start the server to access the App and Dashboard.</p>
+            <form class="row" id="greet-form" style="margin-top: 20px;">
+              <input id="greet-input" placeholder="Enter a name..." style="padding: 8px; border-radius: 4px; border: 1px solid #ccc;"/>
+              <button type="submit" class="btn-primary">Test Rust Backend</button>
+            </form>
+            <p id="greet-msg" style="margin-top: 10px; color: #666;"></p>
+          </div>
+        </div>
+
+        <!-- VIEW 2: APP (Root /) -->
+        <div id="view-app" class="view">
+          <div class="iframe-container">
+            <div id="loader-app" class="loading-overlay">
+              <img src="/src/assets/tauri.svg" class="loading-logo" alt="Loading...">
+              <h3>Loading App...</h3>
+              <p>Waiting for server connection...</p>
+            </div>
+            <iframe id="frame-app" src="about:blank"></iframe>
+          </div>
+        </div>
+
+        <!-- VIEW 3: DASHBOARD (/_dashboard) -->
+        <div id="view-dash" class="view">
+          <div class="iframe-container">
+            <div id="loader-dash" class="loading-overlay">
+              <img src="/src/assets/tauri.svg" class="loading-logo" alt="Loading...">
+              <h3>Loading Dashboard...</h3>
+              <p>Waiting for server connection...</p>
+            </div>
+            <iframe id="frame-dash" src="about:blank"></iframe>
+          </div>
+        </div>
+
+      </main>
+    </div>
   </body>
 </html>

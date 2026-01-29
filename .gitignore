@@ -7,6 +7,12 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# --- Tauri Sidecars & Binaries ---
+# Ignore all files in the binaries folder...
+src-tauri/binaries/*
+# ...but keep the .gitkeep file (so the folder structure exists in git)
+!src-tauri/binaries/.gitkeep
+
 node_modules
 dist
 dist-ssr
