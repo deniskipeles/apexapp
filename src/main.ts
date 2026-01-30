@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 const navHome = document.querySelector("#nav-home") as HTMLButtonElement;
 const navApp = document.querySelector("#nav-app") as HTMLButtonElement;
 const navDash = document.querySelector("#nav-dash") as HTMLButtonElement;
+const btnRefresh = document.querySelector("#btn-refresh") as HTMLButtonElement;
 
 const viewHome = document.querySelector("#view-home") as HTMLElement;
 const viewApp = document.querySelector("#view-app") as HTMLElement;
@@ -28,7 +29,44 @@ const greetMsgEl = document.querySelector("#greet-msg") as HTMLElement;
 
 let isServerRunning = false;
 
-// --- DISPLAY LOGIC (Iframe vs Window) ---
+// ---------------------------------------------------------
+// 1. REFRESH LOGIC (Soft Refresh)
+// ---------------------------------------------------------
+function refreshCurrentView() {
+  if (!isServerRunning) return;
+
+  const useNewWindow = windowModeToggle.checked;
+  const baseUrl = "http://localhost:5000";
+
+  // APP VIEW
+  if (navApp.classList.contains('active')) {
+    if (useNewWindow) {
+      // Focus external window
+      invoke("open_separate_window", { label: "apex-app-window", title: "Apex App", url: baseUrl + "/" });
+    } else {
+      // Reload Iframe
+      console.log("Refreshing App Iframe...");
+      // Append timestamp to force reload if cache is stubborn, or just reassign src
+      frameApp.src = frameApp.src; 
+    }
+  } 
+  // DASHBOARD VIEW
+  else if (navDash.classList.contains('active')) {
+    if (useNewWindow) {
+      invoke("open_separate_window", { label: "apex-dash-window", title: "Apex Dashboard", url: baseUrl + "/_dashboard" });
+    } else {
+      console.log("Refreshing Dashboard Iframe...");
+      frameDash.src = frameDash.src;
+    }
+  }
+}
+
+// Bind the button
+btnRefresh.addEventListener('click', refreshCurrentView);
+
+// ---------------------------------------------------------
+// 2. DISPLAY LOGIC
+// ---------------------------------------------------------
 function handleContentDisplay(viewName: 'app' | 'dash') {
   if (!isServerRunning) return;
 
@@ -37,56 +75,23 @@ function handleContentDisplay(viewName: 'app' | 'dash') {
 
   if (viewName === 'app') {
     if (useNewWindow) {
-      // NEW WINDOW MODE
-      invoke("open_separate_window", { 
-        label: "apex-app-window", 
-        title: "Apex App", 
-        url: baseUrl + "/" 
-      });
-      // Update loader to show status in main window
+      invoke("open_separate_window", { label: "apex-app-window", title: "Apex App", url: baseUrl + "/" });
       frameApp.style.display = 'none';
       loaderApp.style.display = 'flex';
-      loaderApp.innerHTML = `
-        <img src="/src/assets/tauri.svg" class="loading-logo" style="width: 50px; height: 50px;">
-        <h3>Open in External Window</h3>
-        <p>The App is running in a separate window.</p>
-      `;
+      loaderApp.innerHTML = `<h3>External Window Active</h3><p>App running in separate window.</p>`;
     } else {
-      // IFRAME MODE
-      // Reset loader style
-      loaderApp.innerHTML = `
-        <img src="/src/assets/tauri.svg" class="loading-logo">
-        <h3>Loading App...</h3>
-        <p>Waiting for server connection...</p>
-      `;
       loaderApp.style.display = 'none';
       frameApp.style.display = 'block';
       if (frameApp.src === "about:blank") frameApp.src = baseUrl + "/";
     }
   } 
-  
   else if (viewName === 'dash') {
     if (useNewWindow) {
-      // NEW WINDOW MODE
-      invoke("open_separate_window", { 
-        label: "apex-dash-window", 
-        title: "Apex Dashboard", 
-        url: baseUrl + "/_dashboard" 
-      });
+      invoke("open_separate_window", { label: "apex-dash-window", title: "Apex Dashboard", url: baseUrl + "/_dashboard" });
       frameDash.style.display = 'none';
       loaderDash.style.display = 'flex';
-      loaderDash.innerHTML = `
-        <img src="/src/assets/tauri.svg" class="loading-logo" style="width: 50px; height: 50px;">
-        <h3>Open in External Window</h3>
-        <p>The Dashboard is running in a separate window.</p>
-      `;
+      loaderDash.innerHTML = `<h3>External Window Active</h3><p>Dashboard running in separate window.</p>`;
     } else {
-      // IFRAME MODE
-      loaderDash.innerHTML = `
-        <img src="/src/assets/tauri.svg" class="loading-logo">
-        <h3>Loading Dashboard...</h3>
-        <p>Waiting for server connection...</p>
-      `;
       loaderDash.style.display = 'none';
       frameDash.style.display = 'block';
       if (frameDash.src === "about:blank") frameDash.src = baseUrl + "/_dashboard";
@@ -94,27 +99,24 @@ function handleContentDisplay(viewName: 'app' | 'dash') {
   }
 }
 
-// --- NAVIGATION LOGIC ---
 function switchView(viewName: 'home' | 'app' | 'dash') {
-  // Reset active classes
   [navHome, navApp, navDash].forEach(el => el.classList.remove('active'));
   [viewHome, viewApp, viewDash].forEach(el => el.classList.remove('active'));
 
-  // Set active class
   if (viewName === 'home') {
     navHome.classList.add('active');
     viewHome.classList.add('active');
   } else if (viewName === 'app') {
     navApp.classList.add('active');
     viewApp.classList.add('active');
-    handleContentDisplay('app'); // Trigger display logic
+    handleContentDisplay('app');
   } else if (viewName === 'dash') {
     navDash.classList.add('active');
     viewDash.classList.add('active');
-    handleContentDisplay('dash'); // Trigger display logic
+    handleContentDisplay('dash');
   }
 
-  // Auto-start if navigating to content
+  // Auto-start check
   if (viewName !== 'home' && !isServerRunning) {
     startServer();
   }
@@ -124,52 +126,51 @@ navHome.addEventListener('click', () => switchView('home'));
 navApp.addEventListener('click', () => switchView('app'));
 navDash.addEventListener('click', () => switchView('dash'));
 
-// --- SERVER LOGIC ---
-
+// ---------------------------------------------------------
+// 3. SERVER LOGIC
+// ---------------------------------------------------------
 async function waitForServer(retries = 30) {
   for (let i = 0; i < retries; i++) {
     try {
       const response = await fetch("http://localhost:5000/", { method: 'HEAD' });
-      if (response.ok || response.status === 401 || response.status === 403) {
-        return true;
-      }
+      if (response.ok || response.status === 401 || response.status === 403) return true;
     } catch (e) { /* wait */ }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   return false;
 }
 
+function setServerRunningState() {
+    isServerRunning = true;
+    statusText.textContent = "Running";
+    statusDot.classList.add("running");
+    serverBtn.textContent = "Running";
+    serverBtn.disabled = true;
+}
+
 async function startServer() {
   if (isServerRunning) return;
 
-  // UI Updates: Loading State
   serverBtn.disabled = true;
   serverBtn.textContent = "Starting...";
   statusText.textContent = "Initializing...";
   
-  // Show loaders
-  loaderApp.style.display = "flex";
-  frameApp.style.display = "none";
-  loaderDash.style.display = "flex";
-  frameDash.style.display = "none";
+  // Show loaders if we are on a content page
+  if (navApp.classList.contains('active') || navDash.classList.contains('active')) {
+    loaderApp.style.display = "flex";
+    loaderDash.style.display = "flex";
+  }
 
   try {
-    // 1. Launch Binary
     await invoke("run_apex_sidecar");
-
-    // 2. Poll
     const success = await waitForServer();
 
     if (success) {
-      isServerRunning = true;
-      statusText.textContent = "Running";
-      statusDot.classList.add("running");
-      serverBtn.textContent = "Running";
-
-      // Trigger content load for whichever tab is active
+      setServerRunningState();
+      
+      // Load current view content
       if (navApp.classList.contains('active')) handleContentDisplay('app');
       if (navDash.classList.contains('active')) handleContentDisplay('dash');
-
     } else {
       throw new Error("Timed out");
     }
@@ -186,7 +187,25 @@ async function startServer() {
 
 serverBtn.addEventListener("click", startServer);
 
-// --- GREET LOGIC ---
+// ---------------------------------------------------------
+// 4. STATE RECOVERY (Handle F5 / Hard Refresh)
+// ---------------------------------------------------------
+window.addEventListener("DOMContentLoaded", async () => {
+    // If the user refreshed the app (F5), the JS state is reset.
+    // However, the sidecar might still be running. Check immediately.
+    const alreadyUp = await waitForServer(1);
+    
+    if (alreadyUp) {
+        console.log("Server detected on startup (Recovery).");
+        setServerRunningState();
+        
+        // Optional: If you wanted to restore the last active tab, 
+        // you would need to save it to localStorage in switchView() 
+        // and read it back here.
+    }
+});
+
+// Greet Logic
 async function greet() {
   if (greetMsgEl && greetInputEl) {
     greetMsgEl.textContent = await invoke("greet", { name: greetInputEl.value });

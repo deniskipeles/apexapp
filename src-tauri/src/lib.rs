@@ -45,6 +45,12 @@ fn run_apex_sidecar(app: AppHandle, state: State<'_, ApexState>) {
     }
 
     let sidecar_command = app.shell().sidecar("apexkit").unwrap();
+    
+    // In v2, we get the resource directory like this:
+    let resource_dir = app.path().resource_dir().unwrap();
+
+    // Set CWD to the resources folder so 'storage-apex' is relative to the exe
+    let sidecar_command = sidecar_command.current_dir(resource_dir);
 
     // Capture the 'child' process handle
     let (mut rx, child) = sidecar_command

@@ -172,5 +172,24 @@ iframe {
   cursor: not-allowed;
 }
 
+/* Add inside .nav-btn section */
+.refresh-btn {
+  font-size: 1.2rem;
+  padding: 4px 10px;
+  margin-left: 10px;
+  border-radius: 50%;
+  width: 35px;
+  height: 35px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.refresh-btn:hover {
+  background-color: #e3ebf7;
+  color: var(--primary-color);
+  transform: rotate(180deg);
+  transition: transform 0.4s ease, background-color 0.2s;
+}
+
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pulse { 0% { opacity: 0.6; transform: scale(0.95); } 50% { opacity: 1; transform: scale(1.05); } 100% { opacity: 0.6; transform: scale(0.95); } }
