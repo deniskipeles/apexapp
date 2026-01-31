@@ -14,8 +14,10 @@
       <!-- TOP NAVIGATION BAR -->
       <header class="navbar">
         <div class="brand">
-          <img src="/src/assets/tauri.svg" alt="Logo" style="height: 24px;">
-          <span>ApexApp</span>
+          <!-- Added ID: app-logo -->
+          <img id="app-logo" src="/src/assets/apex.svg" onerror="this.src='/src/assets/apex.svg'" alt="Logo" style="height: 24px; object-fit: contain;">
+          <!-- Added ID: app-name -->
+          <span id="app-name">ApexApp</span>
         </div>
 
         <div class="nav-links">

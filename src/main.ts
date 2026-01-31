@@ -27,6 +27,10 @@ const loaderDash = document.querySelector("#loader-dash") as HTMLElement;
 const greetInputEl = document.querySelector("#greet-input") as HTMLInputElement;
 const greetMsgEl = document.querySelector("#greet-msg") as HTMLElement;
 
+
+const appNameEl = document.querySelector("#app-name") as HTMLElement;
+const appLogoEl = document.querySelector("#app-logo") as HTMLImageElement;
+
 let isServerRunning = false;
 
 // ---------------------------------------------------------
@@ -47,9 +51,9 @@ function refreshCurrentView() {
       // Reload Iframe
       console.log("Refreshing App Iframe...");
       // Append timestamp to force reload if cache is stubborn, or just reassign src
-      frameApp.src = frameApp.src; 
+      frameApp.src = frameApp.src;
     }
-  } 
+  }
   // DASHBOARD VIEW
   else if (navDash.classList.contains('active')) {
     if (useNewWindow) {
@@ -84,7 +88,7 @@ function handleContentDisplay(viewName: 'app' | 'dash') {
       frameApp.style.display = 'block';
       if (frameApp.src === "about:blank") frameApp.src = baseUrl + "/";
     }
-  } 
+  }
   else if (viewName === 'dash') {
     if (useNewWindow) {
       invoke("open_separate_window", { label: "apex-dash-window", title: "Apex Dashboard", url: baseUrl + "/_dashboard" });
@@ -126,6 +130,49 @@ navHome.addEventListener('click', () => switchView('home'));
 navApp.addEventListener('click', () => switchView('app'));
 navDash.addEventListener('click', () => switchView('dash'));
 
+
+// ---------------------------------------------------------
+// 3. FETCH BRAND LOGIC
+// ---------------------------------------------------------
+/**
+ * Fetches App Name and Logo from the running backend.
+ * Called inside startServer() after success.
+ */
+async function fetchBranding() {
+  const baseUrl = "http://localhost:5000";
+
+  try {
+    // 1. Fetch App Name
+    // Using the public endpoint we created earlier: /app-name
+    // Or fallback to settings API if authenticated (which we aren't here)
+    // Assuming /app-name is public:
+    const nameRes = await fetch(`${baseUrl}/app-name`);
+    if (nameRes.ok) {
+      const data = await nameRes.json();
+      if (data.app_name) {
+        appNameEl.textContent = data.app_name;
+        // Update window title too
+        document.title = data.app_name;
+      }
+    }
+
+    // 2. Fetch Logo
+    // The /logo endpoint returns binary image data or 404
+    // We can just set the src. If it fails, the onerror handler (defined below) will revert it.
+    const logoUrl = `${baseUrl}/logo?t=${Date.now()}`; // Cache bust
+
+    // Validate image existence first (Head request) to avoid broken image icon
+    const imgRes = await fetch(logoUrl, { method: 'HEAD' });
+    if (imgRes.ok) {
+      appLogoEl.src = logoUrl;
+    }
+
+  } catch (e) {
+    console.warn("Failed to load branding:", e);
+  }
+}
+
+
 // ---------------------------------------------------------
 // 3. SERVER LOGIC
 // ---------------------------------------------------------
@@ -141,11 +188,11 @@ async function waitForServer(retries = 30) {
 }
 
 function setServerRunningState() {
-    isServerRunning = true;
-    statusText.textContent = "Running";
-    statusDot.classList.add("running");
-    serverBtn.textContent = "Running";
-    serverBtn.disabled = true;
+  isServerRunning = true;
+  statusText.textContent = "Running";
+  statusDot.classList.add("running");
+  serverBtn.textContent = "Running";
+  serverBtn.disabled = true;
 }
 
 async function startServer() {
@@ -154,7 +201,7 @@ async function startServer() {
   serverBtn.disabled = true;
   serverBtn.textContent = "Starting...";
   statusText.textContent = "Initializing...";
-  
+
   // Show loaders if we are on a content page
   if (navApp.classList.contains('active') || navDash.classList.contains('active')) {
     loaderApp.style.display = "flex";
@@ -167,7 +214,10 @@ async function startServer() {
 
     if (success) {
       setServerRunningState();
-      
+
+      // Call Branding Fetcher Here
+      fetchBranding();
+
       // Load current view content
       if (navApp.classList.contains('active')) handleContentDisplay('app');
       if (navDash.classList.contains('active')) handleContentDisplay('dash');
@@ -191,18 +241,21 @@ serverBtn.addEventListener("click", startServer);
 // 4. STATE RECOVERY (Handle F5 / Hard Refresh)
 // ---------------------------------------------------------
 window.addEventListener("DOMContentLoaded", async () => {
-    // If the user refreshed the app (F5), the JS state is reset.
-    // However, the sidecar might still be running. Check immediately.
-    const alreadyUp = await waitForServer(1);
-    
-    if (alreadyUp) {
-        console.log("Server detected on startup (Recovery).");
-        setServerRunningState();
-        
-        // Optional: If you wanted to restore the last active tab, 
-        // you would need to save it to localStorage in switchView() 
-        // and read it back here.
-    }
+  // If the user refreshed the app (F5), the JS state is reset.
+  // However, the sidecar might still be running. Check immediately.
+  const alreadyUp = await waitForServer(1);
+
+  if (alreadyUp) {
+    console.log("Server detected on startup (Recovery).");
+    setServerRunningState();
+
+    // Call Branding Fetcher Here
+    fetchBranding();
+
+    // Optional: If you wanted to restore the last active tab, 
+    // you would need to save it to localStorage in switchView() 
+    // and read it back here.
+  }
 });
 
 // Greet Logic
