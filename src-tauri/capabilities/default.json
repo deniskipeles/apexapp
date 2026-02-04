@@ -10,11 +10,8 @@
     {
       "identifier": "shell:allow-execute",
       "allow": [
-        {
-          "name": "apexkit",
-          "cmd": "program",
-          "args": true
-        }
+        { "name": "apexkit", "cmd": "program", "args": true },
+        { "name": "cloudflared", "cmd": "program", "args": true }
       ]
     }
   ]

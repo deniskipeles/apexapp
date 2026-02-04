@@ -10,8 +10,10 @@ lerna-debug.log*
 # --- Tauri Sidecars & Binaries ---
 # Ignore all files in the binaries folder...
 src-tauri/binaries/*
+src-tauri/webview2/*
 # ...but keep the .gitkeep file (so the folder structure exists in git)
 !src-tauri/binaries/.gitkeep
+!src-tauri/webview2/.gitkeep
 
 node_modules
 dist

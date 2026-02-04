@@ -37,65 +37,70 @@ runner = "cargo-xwin"
 EOF
 
 # ==========================================
-# 5. DOWNLOAD SPECIFIC GITHUB ARTIFACT
+# 5. DOWNLOAD LATEST APEXKIT RELEASE (SIDECAR)
 # ==========================================
 SIDECAR_NAME="apexkit" 
-ARTIFACT_ID="5342224916"
 REPO_OWNER="deniskipeles"
 REPO_NAME="apex-kit"
 
 TARGET_DIR="src-tauri/binaries"
+# Note: Tauri is strict. If we build for msvc, the sidecar MUST end in x86_64-pc-windows-msvc.exe
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-pc-windows-msvc.exe"
 mkdir -p "$TARGET_DIR"
 
+# Use GH_TOKEN from Workflow or fallback to GITHUB_TOKEN
 AUTH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
 
-echo "📥 Downloading Sidecar Artifact ID: $ARTIFACT_ID from $REPO_OWNER/$REPO_NAME..."
+if [ -z "$AUTH_TOKEN" ]; then
+    echo "❌ Error: GITHUB_TOKEN is not set. Cannot access private repository."
+    exit 1
+fi
 
-# 1. Download the file
+echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME..."
+
+# 1. Get the latest release JSON
+RELEASE_JSON=$(curl -s -H "Authorization: token $AUTH_TOKEN" \
+  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases?per_page=1")
+
+# 2. Extract the Asset ID for the Windows binary (looking for "windows" in name)
+# We use grep/awk to avoid dependency on 'jq' if it's missing, though most runners have it.
+ASSET_ID=$(echo "$RELEASE_JSON" | grep -B 20 "windows" | grep '"id":' | head -n 1 | awk '{print $2}' | tr -d ',')
+
+if [ -z "$ASSET_ID" ] || [ "$ASSET_ID" = "null" ]; then
+    echo "❌ Error: Could not find a Windows binary in the latest release."
+    echo "Response preview: $(echo "$RELEASE_JSON" | head -n 20)"
+    exit 1
+fi
+
+echo "📥 Downloading Latest Sidecar Asset ID: $ASSET_ID..."
+
+# 3. Download the actual binary using the GitHub Assets API
 HTTP_CODE=$(curl -L -w "%{http_code}" \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
-  -H "X-GitHub-Api-Version: 2022-11-28" \
-  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/artifacts/$ARTIFACT_ID/zip" \
-  -o sidecar_temp.zip)
+  -H "Authorization: token $AUTH_TOKEN" \
+  -H "Accept: application/octet-stream" \
+  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/assets/$ASSET_ID" \
+  -o "$TARGET_FILE")
 
-# 2. Check HTTP Status
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
-    echo "⚠️ Content of response:"
-    cat sidecar_temp.zip
-    echo ""
-    echo "👉 TIP: If Status is 404, the Artifact ID is expired or wrong."
-    echo "👉 TIP: If Status is 401/403, your Token cannot access the other repo."
     exit 1
 fi
 
-# 3. Check File Size (JSON errors are small, Real Zips are big)
-FILE_SIZE=$(wc -c < sidecar_temp.zip)
-if [ "$FILE_SIZE" -lt 1000 ]; then
-    echo "❌ Error: File is too small ($FILE_SIZE bytes). It is likely a JSON error, not a ZIP."
-    cat sidecar_temp.zip
-    exit 1
+echo "✅ Sidecar updated: $TARGET_FILE"
+chmod +x "$TARGET_FILE"
+# ==========================================
+
+# ==========================================
+# 5.5 DOWNLOAD CLOUDFLARED (SIDECAR)
+# ==========================================
+CF_BINARY_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+CF_TARGET_FILE="${TARGET_DIR}/cloudflared-x86_64-pc-windows-msvc.exe"
+
+if [ ! -f "$CF_TARGET_FILE" ]; then
+    echo "📥 Downloading cloudflared..."
+    curl -L "$CF_BINARY_URL" -o "$CF_TARGET_FILE"
+    chmod +x "$CF_TARGET_FILE"
 fi
-
-# 4. Unzip
-echo "📂 Extracting Sidecar..."
-unzip -o sidecar_temp.zip -d extracted_sidecar
-
-FOUND_EXE=$(find extracted_sidecar -name "*.exe" | head -n 1)
-
-if [ -f "$FOUND_EXE" ]; then
-    echo "✅ Found binary: $FOUND_EXE"
-    mv "$FOUND_EXE" "$TARGET_FILE"
-    echo "🚀 Moved to: $TARGET_FILE"
-    rm sidecar_temp.zip
-    rm -rf extracted_sidecar
-else
-    echo "❌ Error: No .exe found inside the artifact zip!"
-    exit 1
-fi
-
 # ==========================================
 
 # 6. Download Microsoft SDKs

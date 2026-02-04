@@ -1,0 +1,39 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: macos-latest # This is the key: Running on a real Mac
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+
+      - name: Prepare Sidecars
+        run: |
+          chmod +x prepare_macos.sh
+          ./prepare_macos.sh
+
+      - name: Build App
+        run: |
+          npm install
+          # We build a Universal binary that works on both Intel and M1/M2 Macs
+          npm run tauri build -- --target universal-apple-darwin
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacOS-DMG
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg

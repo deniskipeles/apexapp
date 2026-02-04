@@ -13,6 +13,7 @@ export default defineConfig(async () => ({
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
+    // allowedHosts:["1420-01ke6hmdydtz0mhahe6ktw06fm.cloudspaces.litng.ai"],
     strictPort: true,
     host: host || false,
     hmr: host
