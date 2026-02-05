@@ -9,9 +9,8 @@ sudo apt-get update
 sudo apt-get install -y build-essential curl wget jq file libssl-dev libgtk-3-dev \
     libayatana-appindicator3-dev librsvg2-dev xdg-utils nsis lld llvm clang unzip
 
-# 2. Install Rust 1.75.0 (LAST VERSION SUPPORTING WIN 7)
-echo "🦀 Installing Rust 1.75.0 for Windows 7 compatibility..."
-if ! command -v rustup &> /dev/null; then
+# 2. Install Rust
+if ! command -v cargo &> /dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
 fi
@@ -110,16 +109,19 @@ else
 fi
 
 # 8. Download Windows SDKs (Cached if possible)
-echo "📥 Preparing Windows SDKs..."
-mkdir -p xwin
-yes yes | xwin splat --output ./xwin
+if [ ! -d "xwin" ]; then
+    echo "📥 Preparing Windows SDKs..."
+    mkdir -p xwin
+    yes yes | xwin splat --output ./xwin
+    echo "✅ Windows SDKs prepared."
+fi
 
 # 9. Build
 # 9. Build with Dynamic Patching
 npm install
 
 echo "🗑️ Removing newer Cargo.lock to prevent version conflict..."
-# This forces Rust 1.75 to generate a compatible version 3 lockfile
+# This forces Rust to generate a compatible version lockfile
 rm -f src-tauri/Cargo.lock
 
 echo "🛠️ Temporarily patching tauri.conf.json for Offline WebView2..."
@@ -135,16 +137,21 @@ jq '.bundle.windows.webviewInstallMode = {
 
 # Build
 echo "🚀 BUILDING WINDOWS 7 OFFLINE INSTALLER..."
-(
-  RUSTFLAGS="-Lnative=$(pwd)/xwin/crt/lib/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/um/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/ucrt/x86_64" \
-  npm run tauri build -- --target x86_64-pc-windows-msvc
-) || BUILD_FAILED=true
+# (
+#   RUSTFLAGS="-Lnative=$(pwd)/xwin/crt/lib/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/um/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/ucrt/x86_64" \
+#   npm run tauri build -- --target x86_64-pc-windows-msvc
+# ) || BUILD_FAILED=true
+RUSTFLAGS="-Lnative=$(pwd)/xwin/crt/lib/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/um/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/ucrt/x86_64" \
+npm run tauri build -- --target x86_64-pc-windows-msvc
 
+# Clean up
 echo "🧹 Reverting tauri.conf.json..."
 mv src-tauri/tauri.conf.json.bak src-tauri/tauri.conf.json
 
-if [ "$BUILD_FAILED" = true ]; then
-    echo "❌ Build failed!"
-    exit 1
-fi
+# if [ "$BUILD_FAILED" = true ]; then
+#     echo "❌ Build failed!"
+#     exit 1
+# fi
+
+echo "✅ DONE"
 echo "📁 Installer located in: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/"

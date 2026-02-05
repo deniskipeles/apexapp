@@ -104,14 +104,19 @@ fi
 # ==========================================
 
 # 6. Download Microsoft SDKs
-echo "📥 Downloading Microsoft Windows SDKs..."
-mkdir -p xwin
-
-# FIX: Send the full word "yes" to satisfy the prompt
-yes yes | xwin splat --output ./xwin
+if [ ! -d "xwin" ]; then
+    echo "📥 Downloading Microsoft Windows SDKs..."
+    mkdir -p xwin
+    # Send the full word "yes" to satisfy the prompt
+    yes yes | xwin splat --output ./xwin
+    echo "✅ Microsoft Windows SDKs downloaded."
+fi
 
 # 7. Build
 npm install
+echo "🗑️ Removing newer Cargo.lock to prevent version conflict..."
+# This forces Rust to generate a compatible version lockfile
+rm -f src-tauri/Cargo.lock
 echo "🚀 BUILDING TAURI APP..."
 RUSTFLAGS="-Lnative=$(pwd)/xwin/crt/lib/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/um/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/ucrt/x86_64" \
 npm run tauri build -- --target x86_64-pc-windows-msvc

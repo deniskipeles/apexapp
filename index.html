@@ -10,7 +10,7 @@
   <style>
     /* Inline specific styles for settings cards */
     /* Update the view class to handle its own scrolling */
-    .view-settings {
+    .view-settings-page {
       display: none;
       height: 100%;
       /* Fill the content area */
@@ -29,8 +29,9 @@
     <!-- TOP NAVIGATION BAR -->
     <header class="navbar">
       <div class="brand">
-        <img id="app-logo" src="/src/assets/apex.svg" onerror="this.src='/src/assets/apex.svg'" alt="Logo"
-          style="height: 24px; object-fit: contain;">
+        <!-- Added ID: app-logo -->
+        <img id="app-logo" src="/src/assets/apex.svg" onerror="this.src='/src/assets/apex.svg'" alt="Logo" style="height: 24px; object-fit: contain;">
+        <!-- Added ID: app-name -->
         <span id="app-name">ApexApp</span>
       </div>
 
@@ -89,7 +90,7 @@
       </div>
 
       <!-- VIEW 3: SETTINGS (Replaces Home) -->
-      <div id="view-settings" class="view  view-settings">
+      <div id="view-settings" class="view  view-settings-page">
         <div class="settings-container">
 
           <!-- Global Sharing Card -->
