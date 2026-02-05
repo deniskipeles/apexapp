@@ -40,10 +40,6 @@
       "nsis": {
         "installerHooks": "nsis/hooks.nsh",
         "installMode": "perMachine"
-      },
-      "webviewInstallMode": {
-        "type": "fixedRuntime",
-        "path": "./webview2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
       }
     }
   }
