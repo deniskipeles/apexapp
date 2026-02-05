@@ -85,35 +85,36 @@ fi
 echo "✅ Cloudflared sidecar updated."
 
 # ==========================================
-# 7. DOWNLOAD WEBVIEW2 OFFLINE INSTALLER (WIN 7 SUPPORT)
+# 7. DOWNLOAD & EXTRACT WEBVIEW2 FIXED RUNTIME (WIN 7)
 # ==========================================
+sudo apt-get install -y cabextract
+
 WEBVIEW_DIR="src-tauri/webview2"
-WEBVIEW_FILE="$WEBVIEW_DIR/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
-mkdir -p "$WEBVIEW_DIR"
+FIXED_PATH="$WEBVIEW_DIR/fixed"
+mkdir -p "$FIXED_PATH"
 
-if [ ! -f "$WEBVIEW_FILE" ]; then
-    echo "📥 Downloading WebView2 v109 (Final version for Windows 7)..."
+if [ ! -f "$FIXED_PATH/msedgewebview2.exe" ]; then
+    echo "📥 Downloading WebView2 Fixed Version..."
+    URL="https://github.com/westinyang/WebView2RuntimeArchive/releases/download/109.0.1518.78/Microsoft.WebView2.FixedVersionRuntime.109.0.1518.78.x64.cab"
+    curl -L -o "webview2.cab" "$URL"
     
-    # Updated link to the v109 fixed-version standalone installer
-    # If this link eventually dies, you can download "Fixed Version 109" from 
-    # developer.microsoft.com/en-us/microsoft-edge/webview2/
-    URL="https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/fb92440b-04f7-495a-939e-9d2987a0572b/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+    echo "📂 Extracting Fixed Runtime..."
+    cabextract -d "$FIXED_PATH" "webview2.cab"
     
-    wget -O "$WEBVIEW_FILE" "$URL" || {
-        echo "❌ Error: Failed to download WebView2. Microsoft may have moved the file."
-        echo "Please download the x64 'Fixed Version 109' manually and place it in $WEBVIEW_FILE"
-        exit 1
-    }
+    # [NEW] FLATTEN DIRECTORY
+    # cabextract creates a subfolder named "Microsoft.WebView2.FixedVersionRuntime..."
+    # We find that folder and move everything inside it up to $FIXED_PATH
+    SUBFOLDER=$(find "$FIXED_PATH" -maxdepth 1 -type d -name "Microsoft.WebView2.*" | head -n 1)
+    if [ -n "$SUBFOLDER" ]; then
+        echo "🧹 Flattening directory structure..."
+        mv "$SUBFOLDER"/* "$FIXED_PATH/"
+        rmdir "$SUBFOLDER"
+    fi
+    
+    rm "webview2.cab"
+    echo "✅ WebView2 Fixed Runtime ready at $FIXED_PATH"
 else
-    echo "✅ WebView2 Installer found."
-fi
-
-# 8. Download Windows SDKs (Cached if possible)
-if [ ! -d "xwin" ]; then
-    echo "📥 Preparing Windows SDKs..."
-    mkdir -p xwin
-    yes yes | xwin splat --output ./xwin
-    echo "✅ Windows SDKs prepared."
+    echo "✅ WebView2 Fixed Runtime already prepared."
 fi
 
 # 9. Build
@@ -132,7 +133,7 @@ cp src-tauri/tauri.conf.json src-tauri/tauri.conf.json.bak
 # [UPDATE]: New JQ logic to set webviewInstallMode
 jq '.bundle.windows.webviewInstallMode = {
   "type": "fixedRuntime",
-  "path": "./webview2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+  "path": "./webview2/fixed/"
 }' src-tauri/tauri.conf.json > temp_tauri_conf.json && mv temp_tauri_conf.json src-tauri/tauri.conf.json
 
 # Build

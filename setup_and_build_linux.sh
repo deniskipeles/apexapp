@@ -93,6 +93,11 @@ fi
 echo "✅ Cloudflared Linux sidecar updated."
 # ==========================================
 
+echo "🗑️ Removing newer Cargo.lock to prevent version conflict..."
+# This forces Rust to generate a compatible version lockfile
+rm -f src-tauri/Cargo.lock
+
+# ==========================================
 # 6. Build
 npm install
 echo "🚀 BUILDING TAURI APP (AppImage/Deb)..."
