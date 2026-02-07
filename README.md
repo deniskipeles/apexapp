@@ -1,1 +1,1 @@
-Volt Record App
+A Workshop app powered by Tauri and ApexKit
