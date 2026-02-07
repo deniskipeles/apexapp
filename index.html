@@ -7,20 +7,6 @@
   <link rel="stylesheet" href="/src/styles.css" />
   <title>ApexApp</title>
   <script type="module" src="/src/main.ts" defer></script>
-  <style>
-    /* Inline specific styles for settings cards */
-    /* Update the view class to handle its own scrolling */
-    .view-settings-page {
-      display: none;
-      height: 100%;
-      /* Fill the content area */
-      width: 100%;
-      overflow-y: auto;
-      /* Enable vertical scroll for long settings pages */
-      padding-bottom: 40px;
-      /* Give some breathing room at the bottom */
-    }
-  </style>
 </head>
 
 <body>
@@ -29,9 +15,7 @@
     <!-- TOP NAVIGATION BAR -->
     <header class="navbar">
       <div class="brand">
-        <!-- Added ID: app-logo -->
-        <img id="app-logo" src="/src/assets/apex.svg" onerror="this.src='/src/assets/apex.svg'" alt="Logo" style="height: 24px; object-fit: contain;">
-        <!-- Added ID: app-name -->
+        <img id="app-logo" src="/src/assets/apex.svg" onerror="this.src='/src/assets/apex.svg'" alt="Logo">
         <span id="app-name">ApexApp</span>
       </div>
 

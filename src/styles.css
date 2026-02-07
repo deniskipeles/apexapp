@@ -28,25 +28,45 @@ html {
 }
 
 /* --- Navbar --- */
+/* Ensure the navbar itself has a fixed height */
 .navbar {
-  height: var(--nav-height);
-  background-color: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
+  height: 64px; /* Set a standard height */
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-  flex-shrink: 0;
-  z-index: 10;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0; /* Prevent the navbar from squishing */
+  z-index: 100;
 }
 
+/* Constrain the brand container */
 .brand {
-  font-weight: bold;
-  font-size: 1.1rem;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  height: 100%; /* Fill the navbar height */
+  max-width: 250px; /* Prevent long names from pushing buttons out */
+  overflow: hidden;
+}
+
+/* THE FIX: Force the logo to stay inside the box */
+#app-logo {
+  height: 32px !important;    /* Force the height */
+  width: auto;                /* Maintain aspect ratio */
+  max-height: 100%;           /* Never exceed parent */
+  max-width: 120px;           /* Prevent wide logos from taking over */
+  object-fit: contain;        /* Keep it pretty */
+  display: block;
+  flex-shrink: 0;             /* Don't let flexbox squish the logo */
+}
+
+#app-name {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #1e293b;
+  white-space: nowrap;        /* Prevent name from wrapping to 2nd line */
 }
 
 .nav-links {
@@ -220,6 +240,17 @@ iframe {
   color: #666;
   font-size: 0.9rem;
   margin-bottom: 15px;
+}
+
+.view-settings-page {
+  display: none;
+  height: 100%;
+  /* Fill the content area */
+  width: 100%;
+  overflow-y: auto;
+  /* Enable vertical scroll for long settings pages */
+  padding-bottom: 40px;
+  /* Give some breathing room at the bottom */
 }
 
 .tunnel-box {
