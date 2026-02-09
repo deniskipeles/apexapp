@@ -261,19 +261,6 @@ iframe {
   border: 1px solid #e2e8f0;
 }
 
-.url-display {
-  display: flex;
-  background: #1e293b;
-  color: #4ade80;
-  padding: 12px;
-  border-radius: 6px;
-  margin-top: 10px;
-  justify-content: space-between;
-  align-items: center;
-  font-family: monospace;
-  font-size: 0.9rem;
-}
-
 .copy-btn {
   background: #334155;
   border: none;
@@ -318,17 +305,21 @@ iframe {
 
 .url-display {
   display: flex;
-  background: #222;
-  color: #0f0;
-  padding: 10px;
-  border-radius: 4px;
+  background: #1e293b;
+  color: #4ade80;
+  padding: 10px 15px;
+  border-radius: 8px;
   margin-top: 10px;
   justify-content: space-between;
   align-items: center;
+  gap: 15px; /* Space between URL and button group */
 }
 
 .url-display code {
-  font-family: monospace;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-indicator.running {

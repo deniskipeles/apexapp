@@ -94,7 +94,13 @@
               <div id="tunnel-url-box" style="display: none;">
                 <div class="url-display">
                   <code id="tunnel-url-text">Waiting for connection...</code>
-                  <button id="btn-copy-url" class="copy-btn">Copy</button>
+                  <div style="display: flex; gap: 5px;">
+                    <button id="btn-copy-url" class="copy-btn">Copy</button>
+                    <!-- New QR Button -->
+                    <button id="btn-qr-url" class="copy-btn" title="Show QR Code" style="display: flex; align-items: center; justify-content: center; padding: 4px 8px;">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16h.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></svg>
+                    </button>
+                  </div>
                 </div>
                 <p style="font-size: 0.8rem; margin-top: 5px; color: #ef4444;">Warning: Anyone with this link can access
                   your app.</p>
@@ -132,6 +138,22 @@
 
     </main>
   </div>
+
+  <!-- New QR Modal Structure (Add to the bottom of <body>) -->
+<div id="qr-modal" style="display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(4px); z-index: 2000; align-items: center; justify-content: center; padding: 20px;">
+  <div style="background: white; padding: 30px; border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); text-align: center; max-width: 400px; width: 100%; position: relative;" class="animate-in zoom-in duration-300">
+    <button id="btn-close-qr" style="position: absolute; top: 15px; right: 15px; border: none; background: #f1f5f9; color: #64748b; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: bold;">✕</button>
+    
+    <h3 style="margin: 0 0 10px 0; color: #1e293b; font-size: 1.2rem;">Scan to Access</h3>
+    <p style="margin: 0 0 25px 0; color: #64748b; font-size: 0.85rem;">Point your phone camera at the code below to open the public URL.</p>
+    
+    <div id="qr-code-container" style="background: #f8fafc; padding: 20px; border-radius: 16px; display: flex; justify-content: center; border: 1px solid #e2e8f0; margin-bottom: 20px;">
+      <!-- Canvas will be injected here -->
+    </div>
+    
+    <code id="qr-url-display" style="display: block; background: #f1f5f9; padding: 8px; border-radius: 6px; font-size: 0.75rem; color: #334155; word-break: break-all; border: 1px solid #e2e8f0;"></code>
+  </div>
+</div>
 </body>
 
 </html>

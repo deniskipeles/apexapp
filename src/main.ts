@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import QRCode from 'qrcode';
 
 // Navigation
 const navApp = document.querySelector("#nav-app") as HTMLButtonElement;
@@ -41,6 +42,13 @@ const greetMsgEl = document.querySelector("#greet-msg") as HTMLElement;
 // Console
 const consoleArea = document.querySelector("#console-area") as HTMLElement;
 const btnClearConsole = document.querySelector("#btn-clear-console") as HTMLButtonElement;
+
+// QR code
+const btnQrUrl = document.querySelector("#btn-qr-url") as HTMLButtonElement;
+const qrModal = document.querySelector("#qr-modal") as HTMLElement;
+const qrContainer = document.querySelector("#qr-code-container") as HTMLElement;
+const qrUrlDisplay = document.querySelector("#qr-url-display") as HTMLElement;
+const btnCloseQr = document.querySelector("#btn-close-qr") as HTMLButtonElement;
 
 let isServerRunning = false;
 let isTunnelRunning = false;
@@ -322,4 +330,48 @@ function appendLog(message: string) {
 
 btnClearConsole.addEventListener('click', () => {
   consoleArea.innerHTML = `<div style="color: #64748b;">-- Console Cleared --</div>`;
+});
+
+
+// ---------------------------------------------------------
+// QR CODE LOGIC
+// ---------------------------------------------------------
+
+btnQrUrl.addEventListener('click', async () => {
+  const url = tunnelUrlText.textContent;
+  if (!url || url.includes("Waiting")) return;
+
+  try {
+    // 1. Create a canvas element
+    const canvas = document.createElement('canvas');
+    
+    // 2. Generate QR on the canvas
+    await QRCode.toCanvas(canvas, url, {
+      width: 280,
+      margin: 2,
+      color: {
+        dark: '#0f172a',  // Slate 900
+        light: '#f8fafc'  // Slate 50
+      }
+    });
+
+    // 3. Inject into UI
+    qrContainer.innerHTML = '';
+    qrContainer.appendChild(canvas);
+    qrUrlDisplay.textContent = url;
+    
+    // 4. Show Modal
+    qrModal.style.display = 'flex';
+  } catch (err) {
+    console.error("QR Generation failed", err);
+  }
+});
+
+btnCloseQr.addEventListener('click', () => {
+  qrModal.style.display = 'none';
+});
+
+// Close modal if clicking on the backdrop
+qrModal.addEventListener('click', (e) => {
+  if (e.target === qrModal) qrModal.style.display = 'none';
 });
