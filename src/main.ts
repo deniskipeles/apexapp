@@ -31,7 +31,16 @@ const tunnelStatusText = document.querySelector("#tunnel-status-text") as HTMLEl
 const tunnelDot = document.querySelector("#tunnel-dot") as HTMLElement;
 const tunnelUrlBox = document.querySelector("#tunnel-url-box") as HTMLElement;
 const tunnelUrlText = document.querySelector("#tunnel-url-text") as HTMLElement;
+const tunnelWarningText = document.querySelector("#tunnel-warning-text") as HTMLElement;
 const btnCopyUrl = document.querySelector("#btn-copy-url") as HTMLButtonElement;
+const cfTokenInput = document.querySelector("#cf-token-input") as HTMLInputElement;
+
+// .env Management Elements
+const envListEl = document.querySelector("#env-list") as HTMLElement;
+const envKeyInput = document.querySelector("#env-key-input") as HTMLInputElement;
+const envValInput = document.querySelector("#env-val-input") as HTMLInputElement;
+const btnAddEnv = document.querySelector("#btn-add-env") as HTMLButtonElement;
+const btnSaveEnv = document.querySelector("#btn-save-env") as HTMLButtonElement;
 
 // Branding
 const appNameEl = document.querySelector("#app-name") as HTMLElement;
@@ -52,6 +61,13 @@ const btnCloseQr = document.querySelector("#btn-close-qr") as HTMLButtonElement;
 
 let isServerRunning = false;
 let isTunnelRunning = false;
+let isCustomDomain = false;
+
+interface EnvVar {
+  key: string;
+  value: string;
+}
+let envVars: EnvVar[] = [];
 
 // ---------------------------------------------------------
 // 1. INITIALIZATION & VIEW SWITCHING
@@ -61,6 +77,9 @@ let isTunnelRunning = false;
 window.addEventListener("DOMContentLoaded", async () => {
   switchView('app');
   
+  // Load Env Variables immediately on boot
+  loadEnvVars();
+
   // Check if server is already alive (from reload)
   const alreadyUp = await waitForServer(1);
   if (alreadyUp) {
@@ -202,30 +221,46 @@ btnRefresh.addEventListener('click', () => {
 btnToggleTunnel.addEventListener('click', async () => {
   if (!isTunnelRunning) {
     // Start
+    const tokenValue = cfTokenInput.value.trim();
+    isCustomDomain = tokenValue !== "";
+
     btnToggleTunnel.disabled = true;
     btnToggleTunnel.textContent = "Starting Tunnel...";
     tunnelStatusText.textContent = "Initializing...";
     
-    // Invoke Rust command
-    const res = await invoke("toggle_cf_tunnel", { start: true });
+    // Invoke Rust command, passing the token
+    const res = await invoke("toggle_cf_tunnel", { start: true, token: tokenValue });
     console.log(res);
 
-    // Note: The UI updates when the "tunnel-url" event fires below
+    // If using a token, CF won't emit a URL to stdout, so we rely on the connection confirmation event
   } else {
     // Stop
     isTunnelRunning = false;
-    await invoke("toggle_cf_tunnel", { start: false });
+    isCustomDomain = false;
+    await invoke("toggle_cf_tunnel", { start: false, token: null });
     updateTunnelUI(false);
   }
 });
 
-// Listen for Rust event containing the URL
+// Listen for Random Quick Tunnel URL
 listen("tunnel-url", (event) => {
-  const url = event.payload as string;
-  console.log("Tunnel URL received:", url);
-  isTunnelRunning = true;
-  tunnelUrlText.textContent = url;
-  updateTunnelUI(true);
+  if (!isCustomDomain) {
+    const url = event.payload as string;
+    console.log("Tunnel URL received:", url);
+    isTunnelRunning = true;
+    tunnelUrlText.textContent = url;
+    updateTunnelUI(true);
+  }
+});
+
+// Listen for Managed Tunnel Connection
+listen("tunnel-managed-connected", () => {
+  if (isCustomDomain) {
+    console.log("Managed Tunnel Connected");
+    isTunnelRunning = true;
+    tunnelUrlText.textContent = "Custom Domain Active (Managed via Cloudflare)";
+    updateTunnelUI(true);
+  }
 });
 
 function updateTunnelUI(running: boolean) {
@@ -237,6 +272,19 @@ function updateTunnelUI(running: boolean) {
     btnToggleTunnel.textContent = "Stop Tunnel";
     btnToggleTunnel.style.backgroundColor = "#ef4444"; // Red for stop
     tunnelUrlBox.style.display = "block";
+    cfTokenInput.disabled = true; // Lock input while running
+
+    // Hide copy/QR buttons if using a custom domain (we don't know the URL locally)
+    if (isCustomDomain) {
+      btnCopyUrl.style.display = "none";
+      btnQrUrl.style.display = "none";
+      tunnelWarningText.textContent = "Your app is being routed through Cloudflare Zero Trust.";
+    } else {
+      btnCopyUrl.style.display = "block";
+      btnQrUrl.style.display = "flex";
+      tunnelWarningText.textContent = "Warning: Anyone with this link can access your app.";
+    }
+
   } else {
     tunnelStatusText.textContent = "Tunnel Offline";
     tunnelStatusText.style.color = "#64748b";
@@ -245,6 +293,7 @@ function updateTunnelUI(running: boolean) {
     btnToggleTunnel.style.backgroundColor = "#f97316"; // Orange for start
     tunnelUrlBox.style.display = "none";
     tunnelUrlText.textContent = "Waiting for connection...";
+    cfTokenInput.disabled = false; // Unlock input
   }
 }
 
@@ -256,7 +305,118 @@ btnCopyUrl.addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------
-// 5. MISC
+// 5. .ENV MANAGEMENT LOGIC
+// ---------------------------------------------------------
+
+async function loadEnvVars() {
+  try {
+    envVars = await invoke("get_env_vars");
+    renderEnvVars();
+  } catch (err) {
+    console.error("Failed to load .env", err);
+  }
+}
+
+function renderEnvVars() {
+  envListEl.innerHTML = "";
+  if (envVars.length === 0) {
+     envListEl.innerHTML = `<div style="color: #64748b; font-size: 0.85rem; font-style: italic;">No environment variables found.</div>`;
+     return;
+  }
+
+  envVars.forEach((env, index) => {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "10px";
+    row.style.alignItems = "center";
+    
+    const keyInput = document.createElement("input");
+    keyInput.value = env.key;
+    keyInput.style.flex = "1";
+    keyInput.style.padding = "6px";
+    keyInput.style.fontFamily = "monospace";
+    keyInput.style.border = "1px solid #e2e8f0";
+    keyInput.style.borderRadius = "4px";
+    keyInput.style.outline = "none";
+    keyInput.oninput = (e) => envVars[index].key = (e.target as HTMLInputElement).value;
+
+    const valInput = document.createElement("input");
+    valInput.value = env.value;
+    valInput.style.flex = "2";
+    valInput.style.padding = "6px";
+    valInput.style.fontFamily = "monospace";
+    valInput.style.border = "1px solid #e2e8f0";
+    valInput.style.borderRadius = "4px";
+    valInput.style.outline = "none";
+    valInput.oninput = (e) => envVars[index].value = (e.target as HTMLInputElement).value;
+
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "✕";
+    delBtn.title = "Delete";
+    delBtn.style.border = "none";
+    delBtn.style.background = "#fee2e2";
+    delBtn.style.color = "#ef4444";
+    delBtn.style.cursor = "pointer";
+    delBtn.style.padding = "6px 12px";
+    delBtn.style.borderRadius = "4px";
+    delBtn.style.fontWeight = "bold";
+    delBtn.onclick = () => {
+       envVars.splice(index, 1);
+       renderEnvVars();
+    };
+
+    row.appendChild(keyInput);
+    row.appendChild(valInput);
+    row.appendChild(delBtn);
+    envListEl.appendChild(row);
+  });
+}
+
+btnAddEnv.addEventListener("click", () => {
+  const key = envKeyInput.value.trim();
+  const val = envValInput.value.trim();
+  if (key) {
+    // Overwrite if key already exists, otherwise add
+    const existingIndex = envVars.findIndex(e => e.key === key);
+    if (existingIndex !== -1) {
+        envVars[existingIndex].value = val;
+    } else {
+        envVars.push({ key, value: val });
+    }
+    
+    envKeyInput.value = "";
+    envValInput.value = "";
+    renderEnvVars();
+  }
+});
+
+btnSaveEnv.addEventListener("click", async () => {
+  try {
+    const originalText = btnSaveEnv.textContent;
+    btnSaveEnv.textContent = "Saving...";
+    btnSaveEnv.disabled = true;
+    
+    // Filter out empty keys before saving
+    const validVars = envVars.filter(e => e.key.trim() !== "");
+    await invoke("save_env_vars", { vars: validVars });
+    
+    btnSaveEnv.textContent = "Saved!";
+    setTimeout(() => {
+       btnSaveEnv.textContent = originalText;
+       btnSaveEnv.disabled = false;
+    }, 2000);
+    
+    loadEnvVars(); // Refresh to normalize visual state
+  } catch (err) {
+    console.error(err);
+    alert("Failed to save .env file");
+    btnSaveEnv.textContent = "Save to .env";
+    btnSaveEnv.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------
+// 6. MISC
 // ---------------------------------------------------------
 async function fetchBranding() {
   const baseUrl = "http://localhost:5000";
@@ -267,7 +427,6 @@ async function fetchBranding() {
       if (data.app_name) appNameEl.textContent = data.app_name;
     }
 
-    // Add this section to use appLogoEl:
     const logoUrl = `${baseUrl}/logo?t=${Date.now()}`;
     const imgRes = await fetch(logoUrl, { method: 'HEAD' });
     if (imgRes.ok) {
@@ -339,7 +498,7 @@ btnClearConsole.addEventListener('click', () => {
 
 btnQrUrl.addEventListener('click', async () => {
   const url = tunnelUrlText.textContent;
-  if (!url || url.includes("Waiting")) return;
+  if (!url || url.includes("Waiting") || url.includes("Custom Domain")) return;
 
   try {
     // 1. Create a canvas element

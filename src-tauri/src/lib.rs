@@ -1,12 +1,21 @@
 use std::sync::Mutex;
+use std::fs;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
+use serde::{Serialize, Deserialize};
 
 // State to hold child processes
 struct ApexState {
     apex_process: Mutex<Option<CommandChild>>,
     tunnel_process: Mutex<Option<CommandChild>>,
+}
+
+// Struct for Environment Variables
+#[derive(Serialize, Deserialize)]
+pub struct EnvVar {
+    key: String,
+    value: String,
 }
 
 #[tauri::command]
@@ -73,7 +82,7 @@ fn run_apex_sidecar(app: AppHandle, state: State<'_, ApexState>) {
 }
 
 #[tauri::command]
-fn toggle_cf_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool) -> Result<String, String> {
+fn toggle_cf_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool, token: Option<String>) -> Result<String, String> {
     let mut tunnel_guard = state.tunnel_process.lock().unwrap();
 
     // STOP TUNNEL
@@ -90,28 +99,44 @@ fn toggle_cf_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool) ->
         return Ok("Tunnel already running".to_string());
     }
 
-    // Command: cloudflared tunnel --url http://localhost:5000
-    let sidecar = app.shell()
-        .sidecar("cloudflared")
-        .map_err(|e| e.to_string())?
-        .args(["tunnel", "--url", "http://localhost:5000"]);
+    // Determine arguments based on whether a token is provided
+    let mut sidecar = app.shell().sidecar("cloudflared").map_err(|e| e.to_string())?;
+
+    let is_managed = match &token {
+        Some(t) if !t.trim().is_empty() => true,
+        _ => false,
+    };
+
+    if is_managed {
+        // Run as a managed tunnel using the token
+        sidecar = sidecar.args(["tunnel", "--no-autoupdate", "run", "--token", token.as_ref().unwrap().trim()]);
+    } else {
+        // Run as a quick (free) tunnel pointing to localhost:5000
+        sidecar = sidecar.args(["tunnel", "--url", "http://localhost:5000"]);
+    }
 
     let (mut rx, child) = sidecar.spawn().map_err(|e| e.to_string())?;
     *tunnel_guard = Some(child);
 
-    // Background Listener for the URL
+    // Background Listener for logs
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stderr(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes);
-                    // Broadcast EVERY line to the console
                     let _ = app.emit("sidecar-log", format!("[Tunnel] {}", line));
 
-                    if line.contains(".trycloudflare.com") {
+                    // Quick Tunnel Output Extraction
+                    if !is_managed && line.contains(".trycloudflare.com") {
                         if let Some(url) = line.split_whitespace().find(|w| w.contains("https://")) {
                             let _ = app.emit("tunnel-url", url);
                         }
+                    }
+                    
+                    // Managed Tunnel Connection Confirmation
+                    if is_managed && (line.contains("Registered tunnel connection") || line.contains("Connection")) {
+                        // Tell the frontend the connection is established
+                        let _ = app.emit("tunnel-managed-connected", "connected");
                     }
                 }
                 CommandEvent::Stdout(line_bytes) => {
@@ -123,6 +148,39 @@ fn toggle_cf_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool) ->
     });
 
     Ok("Tunnel Starting...".to_string())
+}
+
+#[tauri::command]
+fn get_env_vars(app: AppHandle) -> Result<Vec<EnvVar>, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let env_path = resource_dir.join(".env");
+    
+    let mut vars = Vec::new();
+    if let Ok(content) = fs::read_to_string(&env_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let clean_v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                vars.push(EnvVar { key: k.trim().to_string(), value: clean_v });
+            }
+        }
+    }
+    Ok(vars)
+}
+
+#[tauri::command]
+fn save_env_vars(app: AppHandle, vars: Vec<EnvVar>) -> Result<(), String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let env_path = resource_dir.join(".env");
+    
+    let mut content = String::new();
+    for var in vars {
+        content.push_str(&format!("{}=\"{}\"\n", var.key, var.value));
+    }
+    
+    fs::write(&env_path, content).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -138,16 +196,15 @@ pub fn run() {
             greet, 
             run_apex_sidecar, 
             open_separate_window,
-            toggle_cf_tunnel
+            toggle_cf_tunnel,
+            get_env_vars,
+            save_env_vars
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             RunEvent::Exit => {
                 let state = app_handle.state::<ApexState>();
-                
-                // Use .take() and .map() to kill processes cleanly 
-                // while ensuring the lock guard is dropped immediately.
                 let _ = state.apex_process.lock().unwrap().take().map(|c| c.kill());
                 let _ = state.tunnel_process.lock().unwrap().take().map(|c| c.kill());
             }

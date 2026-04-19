@@ -1,21 +1,25 @@
-name: Build Windows App on Linux
+name: Build Windows App (Cross-Compile)
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
 
       # Cache Cargo registry to speed up build
       - name: Cache Rust
@@ -38,17 +42,15 @@ jobs:
           path: ./xwin
           key: ${{ runner.os }}-xwin-sdk
 
-      - name: Run Build Script
-        env:
-          # If apex-kit is PUBLIC, secrets.GITHUB_TOKEN is fine.
-          # If apex-kit is PRIVATE, you need a PAT (Personal Access Token) stored in secrets.
-          GH_TOKEN: ${{ secrets.MY_PAT_TOKEN }} 
+      - name: Run Setup and Build Script
         run: |
           chmod +x setup_and_build.sh
           ./setup_and_build.sh
+        # NO PAT or GH_TOKEN injected here!
 
-      - name: Upload Installer
+      - name: Upload Windows Installer
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-Installer
+          name: apexapp-windows-installer
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          retention-days: 5

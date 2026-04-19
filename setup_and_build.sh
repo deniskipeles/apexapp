@@ -41,45 +41,31 @@ EOF
 # ==========================================
 SIDECAR_NAME="apexkit" 
 REPO_OWNER="deniskipeles"
-REPO_NAME="apex-kit"
+REPO_NAME="apexkit" # Changed to public repo name
 
 TARGET_DIR="src-tauri/binaries"
 # Note: Tauri is strict. If we build for msvc, the sidecar MUST end in x86_64-pc-windows-msvc.exe
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-pc-windows-msvc.exe"
 mkdir -p "$TARGET_DIR"
 
-# Use GH_TOKEN from Workflow or fallback to GITHUB_TOKEN
-AUTH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME (Public Repo)..."
 
-if [ -z "$AUTH_TOKEN" ]; then
-    echo "❌ Error: GITHUB_TOKEN is not set. Cannot access private repository."
-    exit 1
-fi
+# 1. Get the latest release JSON (No Auth Token needed)
+RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
 
-echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME..."
+# 2. Extract the browser_download_url for the Windows binary
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url":' | grep "windows" | awk -F '"' '{print $4}' | head -n 1)
 
-# 1. Get the latest release JSON
-RELEASE_JSON=$(curl -s -H "Authorization: token $AUTH_TOKEN" \
-  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases?per_page=1")
-
-# 2. Extract the Asset ID for the Windows binary (looking for "windows" in name)
-# We use grep/awk to avoid dependency on 'jq' if it's missing, though most runners have it.
-ASSET_ID=$(echo "$RELEASE_JSON" | grep -B 20 "windows" | grep '"id":' | head -n 1 | awk '{print $2}' | tr -d ',')
-
-if [ -z "$ASSET_ID" ] || [ "$ASSET_ID" = "null" ]; then
-    echo "❌ Error: Could not find a Windows binary in the latest release."
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo "❌ Error: Could not find a Windows binary download URL in the latest release."
     echo "Response preview: $(echo "$RELEASE_JSON" | head -n 20)"
     exit 1
 fi
 
-echo "📥 Downloading Latest Sidecar Asset ID: $ASSET_ID..."
+echo "📥 Downloading Latest Sidecar from: $DOWNLOAD_URL"
 
-# 3. Download the actual binary using the GitHub Assets API
-HTTP_CODE=$(curl -L -w "%{http_code}" \
-  -H "Authorization: token $AUTH_TOKEN" \
-  -H "Accept: application/octet-stream" \
-  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/assets/$ASSET_ID" \
-  -o "$TARGET_FILE")
+# 3. Download the actual binary directly
+HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TARGET_FILE")
 
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "❌ Download Failed with HTTP Status: $HTTP_CODE"

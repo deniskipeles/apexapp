@@ -34,7 +34,7 @@ rm -f src-tauri/.cargo/config.toml
 # ==========================================
 SIDECAR_NAME="apexkit" 
 REPO_OWNER="deniskipeles"
-REPO_NAME="apex-kit"
+REPO_NAME="apexkit" # Changed to public repo name
 
 TARGET_DIR="src-tauri/binaries"
 # Note: We name the file -gnu because that is our build target, 
@@ -42,34 +42,24 @@ TARGET_DIR="src-tauri/binaries"
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-unknown-linux-gnu"
 mkdir -p "$TARGET_DIR"
 
-AUTH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME (Public Repo)..."
 
-if [ -z "$AUTH_TOKEN" ]; then
-    echo "❌ Error: GITHUB_TOKEN is not set. Cannot access private repository."
-    exit 1
-fi
+# 1. Get the latest release JSON (No Auth Token needed)
+RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
 
-echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME..."
+# 2. Extract the browser_download_url for the linux-musl binary
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url":' | grep "linux-musl" | awk -F '"' '{print $4}' | head -n 1)
 
-RELEASE_JSON=$(curl -s -H "Authorization: token $AUTH_TOKEN" \
-  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases?per_page=1")
-
-# [UPDATE]: Search for "linux-musl" in the asset name
-ASSET_ID=$(echo "$RELEASE_JSON" | grep -B 20 "linux-musl" | grep '"id":' | head -n 1 | awk '{print $2}' | tr -d ',')
-
-if [ -z "$ASSET_ID" ] || [ "$ASSET_ID" = "null" ]; then
-    echo "❌ Error: Could not find a 'linux-musl' binary in the latest release."
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo "❌ Error: Could not find a 'linux-musl' binary download URL in the latest release."
     echo "Response preview: $(echo "$RELEASE_JSON" | head -n 20)"
     exit 1
 fi
 
 echo "📥 Downloading linux-musl Sidecar and renaming to gnu..."
 
-HTTP_CODE=$(curl -L -w "%{http_code}" \
-  -H "Authorization: token $AUTH_TOKEN" \
-  -H "Accept: application/octet-stream" \
-  "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/assets/$ASSET_ID" \
-  -o "$TARGET_FILE")
+# 3. Download the actual binary directly
+HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TARGET_FILE")
 
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
