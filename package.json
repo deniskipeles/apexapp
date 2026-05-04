@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:win7": "bash prepare_build_for_win7.sh",
     "preview": "vite preview",
     "tauri": "tauri"
   },
