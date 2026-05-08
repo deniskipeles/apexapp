@@ -42,11 +42,14 @@ npm run tauri dev
 ## Building for Production
 
 ```bash
-# Build the application
+# Build the application for modern Windows (10+)
 npm run tauri build
+
+# Build the application for Windows 7 (Offline WebView2)
+npm run build:win7
 ```
 
-The resulting installers will be located in `src-tauri/target/release/bundle/`.
+The resulting installers will be located in `src-tauri/target/release/bundle/` (standard) or `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/` (Windows 7).
 
 ## Contributing
 
