@@ -44,8 +44,8 @@ jobs:
 
       - name: Run Setup and Build Script
         run: |
-          chmod +x setup_and_build.sh
-          ./setup_and_build.sh
+          chmod +x setup_and_build_win10_11.sh
+          ./setup_and_build_win10_11.sh
         # NO PAT or GH_TOKEN injected here!
 
       - name: Upload Windows Installer

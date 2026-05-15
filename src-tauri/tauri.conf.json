@@ -34,7 +34,8 @@
     ],
     "externalBin": [
       "binaries/apexkit",
-      "binaries/cloudflared"
+      "binaries/cloudflared",
+      "binaries/frpc"
     ],
     "windows": {
       "nsis": {

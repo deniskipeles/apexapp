@@ -34,40 +34,51 @@ rm -f src-tauri/.cargo/config.toml
 # ==========================================
 SIDECAR_NAME="apexkit" 
 REPO_OWNER="deniskipeles"
-REPO_NAME="apexkit" # Changed to public repo name
+REPO_NAME="apexkit" 
 
 TARGET_DIR="src-tauri/binaries"
-# Note: We name the file -gnu because that is our build target, 
-# even though the source binary is -musl.
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-unknown-linux-gnu"
 mkdir -p "$TARGET_DIR"
 
 echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME (Public Repo)..."
 
-# 1. Get the latest release JSON (No Auth Token needed)
 RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
-
-# 2. Extract the browser_download_url for the linux-musl binary
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url":' | grep "linux-musl" | awk -F '"' '{print $4}' | head -n 1)
 
 if [ -z "$DOWNLOAD_URL" ]; then
     echo "❌ Error: Could not find a 'linux-musl' binary download URL in the latest release."
-    echo "Response preview: $(echo "$RELEASE_JSON" | head -n 20)"
     exit 1
 fi
 
-echo "📥 Downloading linux-musl Sidecar and renaming to gnu..."
+echo "📥 Downloading linux-musl Sidecar from: $DOWNLOAD_URL"
 
-# 3. Download the actual binary directly
-HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TARGET_FILE")
+TEMP_DIR=$(mktemp -d)
+TEMP_FILE="$TEMP_DIR/downloaded_file"
+
+HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TEMP_FILE")
 
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
+    rm -rf "$TEMP_DIR"
     exit 1
 fi
 
+if [[ "$DOWNLOAD_URL" == *.tar.gz ]]; then
+    echo "📦 Extracting .tar.gz archive..."
+    tar -xzf "$TEMP_FILE" -C "$TEMP_DIR"
+    find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+elif [[ "$DOWNLOAD_URL" == *.zip ]]; then
+    echo "📦 Extracting .zip archive..."
+    unzip -q "$TEMP_FILE" -d "$TEMP_DIR"
+    find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+else
+    echo "📄 Raw binary detected..."
+    mv "$TEMP_FILE" "$TARGET_FILE"
+fi
+
 chmod +x "$TARGET_FILE"
-echo "✅ Sidecar updated: $TARGET_FILE"
+rm -rf "$TEMP_DIR"
+echo "✅ Sidecar updated and ready: $TARGET_FILE"
 
 # ==========================================
 # 5.5 DOWNLOAD CLOUDFLARED (LINUX SIDECAR)
@@ -81,6 +92,22 @@ if [ ! -f "$CF_TARGET_FILE" ]; then
     chmod +x "$CF_TARGET_FILE"
 fi
 echo "✅ Cloudflared Linux sidecar updated."
+
+# ==========================================
+# 5.6 DOWNLOAD FRPC (LINUX SIDECAR)
+# ==========================================
+FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+FRPC_TARGET_FILE="${TARGET_DIR}/frpc-x86_64-unknown-linux-gnu"
+
+if [ ! -f "$FRPC_TARGET_FILE" ]; then
+    echo "📥 Downloading frpc v${FRP_VER} for Linux..."
+    curl -L "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_amd64.tar.gz" -o frp.tar.gz
+    tar -xzf frp.tar.gz
+    mv "frp_${FRP_VER}_linux_amd64/frpc" "$FRPC_TARGET_FILE"
+    chmod +x "$FRPC_TARGET_FILE"
+    rm -rf frp*
+fi
+echo "✅ frpc Linux sidecar updated."
 # ==========================================
 
 echo "🗑️ Removing newer Cargo.lock to prevent version conflict..."

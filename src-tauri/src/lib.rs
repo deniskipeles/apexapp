@@ -9,6 +9,7 @@ use serde::{Serialize, Deserialize};
 struct ApexState {
     apex_process: Mutex<Option<CommandChild>>,
     tunnel_process: Mutex<Option<CommandChild>>,
+    frpc_process: Mutex<Option<CommandChild>>,
 }
 
 // Struct for Environment Variables
@@ -183,6 +184,82 @@ fn save_env_vars(app: AppHandle, vars: Vec<EnvVar>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn toggle_apex_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool, subdomain: Option<String>, token: Option<String>) -> Result<String, String> {
+    let mut tunnel_guard = state.frpc_process.lock().unwrap();
+
+    // STOP TUNNEL
+    if !start {
+        if let Some(child) = tunnel_guard.take() {
+            let _ = child.kill();
+            return Ok("Apex Tunnel Stopped".to_string());
+        }
+        return Ok("Tunnel was not running".to_string());
+    }
+
+    // START TUNNEL
+    if tunnel_guard.is_some() {
+        return Ok("Tunnel already running".to_string());
+    }
+
+    let sub = subdomain.ok_or("Subdomain is required".to_string())?;
+    let tok = token.ok_or("Token is required".to_string())?;
+    
+    // 1. Generate frpc.toml dynamically
+    let app_data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&app_data_dir).map_err(|e| e.to_string())?;
+    let config_path = app_data_dir.join("frpc.toml");
+    
+    // NOTE: Change serverAddr to your actual FRPS server domain/IP
+    let toml_content = format!(r#"
+serverAddr = "frps.apexkit.io"
+serverPort = 7000
+
+# Metadata passed to the FRPS plugin for authentication
+[metas]
+token = "{}"
+
+[[proxies]]
+name = "apexkit-tunnel-{}"
+type = "http"
+localPort = 5000
+subdomain = "{}"
+"#, tok, sub, sub);
+
+    std::fs::write(&config_path, toml_content).map_err(|e| e.to_string())?;
+
+    // 2. Spawn FRPC Sidecar
+    let sidecar = app.shell()
+        .sidecar("frpc").map_err(|e| e.to_string())?
+        .args(["-c", config_path.to_str().unwrap()]);
+
+    let (mut rx, child) = sidecar.spawn().map_err(|e| e.to_string())?;
+    *tunnel_guard = Some(child);
+
+    // 3. Background Listener for logs
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line_bytes) | CommandEvent::Stderr(line_bytes) => {
+                    let line = String::from_utf8_lossy(&line_bytes);
+                    let _ = app.emit("sidecar-log", format!("[ApexTunnel] {}", line));
+
+                    // Detection logic for success/failure
+                    if line.contains("start proxy success") {
+                        let _ = app.emit("apex-tunnel-connected", format!("https://{}.apexkit.io", sub));
+                    }
+                    if line.contains("Unauthorized") || line.contains("Token is not authorized") {
+                         let _ = app.emit("apex-tunnel-error", "Invalid Token or Subdomain mismatch.");
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Ok("Starting Apex Tunnel...".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -191,12 +268,14 @@ pub fn run() {
         .manage(ApexState {
             apex_process: Mutex::new(None),
             tunnel_process: Mutex::new(None),
+            frpc_process: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             greet, 
             run_apex_sidecar, 
             open_separate_window,
             toggle_cf_tunnel,
+            toggle_apex_tunnel,
             get_env_vars,
             save_env_vars
         ])

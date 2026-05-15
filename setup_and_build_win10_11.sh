@@ -41,40 +41,53 @@ EOF
 # ==========================================
 SIDECAR_NAME="apexkit" 
 REPO_OWNER="deniskipeles"
-REPO_NAME="apexkit" # Changed to public repo name
+REPO_NAME="apexkit" 
 
 TARGET_DIR="src-tauri/binaries"
-# Note: Tauri is strict. If we build for msvc, the sidecar MUST end in x86_64-pc-windows-msvc.exe
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-x86_64-pc-windows-msvc.exe"
 mkdir -p "$TARGET_DIR"
 
 echo "🔍 Fetching latest release metadata from $REPO_OWNER/$REPO_NAME (Public Repo)..."
 
-# 1. Get the latest release JSON (No Auth Token needed)
 RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
-
-# 2. Extract the browser_download_url for the Windows binary
 DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url":' | grep "windows" | awk -F '"' '{print $4}' | head -n 1)
 
 if [ -z "$DOWNLOAD_URL" ]; then
     echo "❌ Error: Could not find a Windows binary download URL in the latest release."
-    echo "Response preview: $(echo "$RELEASE_JSON" | head -n 20)"
     exit 1
 fi
 
 echo "📥 Downloading Latest Sidecar from: $DOWNLOAD_URL"
 
-# 3. Download the actual binary directly
-HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TARGET_FILE")
+# Create a temporary directory for extraction
+TEMP_DIR=$(mktemp -d)
+TEMP_FILE="$TEMP_DIR/downloaded_file"
+
+HTTP_CODE=$(curl -L -w "%{http_code}" "$DOWNLOAD_URL" -o "$TEMP_FILE")
 
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
+    rm -rf "$TEMP_DIR"
     exit 1
 fi
 
-echo "✅ Sidecar updated: $TARGET_FILE"
+# Detect if the file is an archive and extract, or just move it if it's a raw binary
+if [[ "$DOWNLOAD_URL" == *.tar.gz ]]; then
+    echo "📦 Extracting .tar.gz archive..."
+    tar -xzf "$TEMP_FILE" -C "$TEMP_DIR"
+    find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+elif [[ "$DOWNLOAD_URL" == *.zip ]]; then
+    echo "📦 Extracting .zip archive..."
+    unzip -q "$TEMP_FILE" -d "$TEMP_DIR"
+    find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+else
+    echo "📄 Raw binary detected..."
+    mv "$TEMP_FILE" "$TARGET_FILE"
+fi
+
 chmod +x "$TARGET_FILE"
-# ==========================================
+rm -rf "$TEMP_DIR"
+echo "✅ Sidecar updated and ready: $TARGET_FILE"
 
 # ==========================================
 # 5.5 DOWNLOAD CLOUDFLARED (SIDECAR)
@@ -87,6 +100,22 @@ if [ ! -f "$CF_TARGET_FILE" ]; then
     curl -L "$CF_BINARY_URL" -o "$CF_TARGET_FILE"
     chmod +x "$CF_TARGET_FILE"
 fi
+
+# ==========================================
+# 5.6 DOWNLOAD FRPC (SIDECAR)
+# ==========================================
+FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+FRPC_TARGET_FILE="${TARGET_DIR}/frpc-x86_64-pc-windows-msvc.exe"
+
+if [ ! -f "$FRPC_TARGET_FILE" ]; then
+    echo "📥 Downloading frpc v${FRP_VER} for Windows..."
+    curl -L "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_windows_amd64.zip" -o frp.zip
+    unzip -q frp.zip
+    mv "frp_${FRP_VER}_windows_amd64/frpc.exe" "$FRPC_TARGET_FILE"
+    chmod +x "$FRPC_TARGET_FILE"
+    rm -rf frp*
+fi
+echo "✅ frpc Windows sidecar updated."
 # ==========================================
 
 # 6. Download Microsoft SDKs

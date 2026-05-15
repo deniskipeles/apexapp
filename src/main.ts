@@ -34,6 +34,15 @@ const tunnelUrlText = document.querySelector("#tunnel-url-text") as HTMLElement;
 const tunnelWarningText = document.querySelector("#tunnel-warning-text") as HTMLElement;
 const btnCopyUrl = document.querySelector("#btn-copy-url") as HTMLButtonElement;
 const cfTokenInput = document.querySelector("#cf-token-input") as HTMLInputElement;
+// Custom Apex Tunnel
+const btnToggleApexTunnel = document.querySelector("#btn-toggle-apex-tunnel") as HTMLButtonElement;
+const apexTunnelStatusText = document.querySelector("#apex-tunnel-status-text") as HTMLElement;
+const apexTunnelDot = document.querySelector("#apex-tunnel-dot") as HTMLElement;
+const apexTunnelUrlBox = document.querySelector("#apex-tunnel-url-box") as HTMLElement;
+const apexTunnelUrlText = document.querySelector("#apex-tunnel-url-text") as HTMLElement;
+const apexSubdomainInput = document.querySelector("#apex-subdomain-input") as HTMLInputElement;
+
+let isApexTunnelRunning = false;
 
 // .env Management Elements
 const envListEl = document.querySelector("#env-list") as HTMLElement;
@@ -303,6 +312,86 @@ btnCopyUrl.addEventListener('click', () => {
   btnCopyUrl.textContent = "Copied!";
   setTimeout(() => btnCopyUrl.textContent = original, 2000);
 });
+// ---------------------------------------------------------
+// APEX FREE TUNNEL LOGIC
+// ---------------------------------------------------------
+const apexTokenInput = document.querySelector("#apex-token-input") as HTMLInputElement;
+
+btnToggleApexTunnel.addEventListener('click', async () => {
+  if (!isApexTunnelRunning) {
+    // Start
+    const subdomain = apexSubdomainInput.value.trim();
+    const token = apexTokenInput.value.trim();
+
+    if (!subdomain || !token) {
+        alert("Please enter both your Token and Subdomain.");
+        return;
+    }
+
+    btnToggleApexTunnel.disabled = true;
+    btnToggleApexTunnel.textContent = "Starting Tunnel...";
+    apexTunnelStatusText.textContent = "Authenticating...";
+    
+    // Disable CF Tunnel button to prevent conflicts
+    btnToggleTunnel.disabled = true;
+
+    try {
+      await invoke("toggle_apex_tunnel", { start: true, subdomain, token });
+    } catch(err) {
+      alert(err);
+      updateApexTunnelUI(false);
+    }
+  } else {
+    // Stop
+    isApexTunnelRunning = false;
+    await invoke("toggle_apex_tunnel", { start: false, subdomain: null, token: null });
+    updateApexTunnelUI(false);
+    btnToggleTunnel.disabled = false;
+  }
+});
+
+// Listen for successful FRPC connection
+listen("apex-tunnel-connected", (event) => {
+  const url = event.payload as string;
+  isApexTunnelRunning = true;
+  apexTunnelUrlText.textContent = url;
+  updateApexTunnelUI(true);
+});
+
+// Listen for Rejections
+listen("apex-tunnel-error", (event) => {
+  const err = event.payload as string;
+  alert("Tunnel Error: " + err);
+  
+  isApexTunnelRunning = false;
+  invoke("toggle_apex_tunnel", { start: false, subdomain: null, token: null });
+  updateApexTunnelUI(false);
+  btnToggleTunnel.disabled = false;
+});
+
+function updateApexTunnelUI(running: boolean) {
+  btnToggleApexTunnel.disabled = false;
+  if (running) {
+    apexTunnelStatusText.textContent = "Tunnel Online";
+    apexTunnelStatusText.style.color = "#10b981";
+    apexTunnelDot.classList.add("running");
+    btnToggleApexTunnel.textContent = "Stop Tunnel";
+    btnToggleApexTunnel.style.backgroundColor = "#ef4444"; 
+    apexTunnelUrlBox.style.display = "block";
+    apexSubdomainInput.disabled = true; 
+    apexTokenInput.disabled = true;
+  } else {
+    apexTunnelStatusText.textContent = "Tunnel Offline";
+    apexTunnelStatusText.style.color = "#64748b";
+    apexTunnelDot.classList.remove("running");
+    btnToggleApexTunnel.textContent = "Start Managed Tunnel";
+    btnToggleApexTunnel.style.backgroundColor = "#3b82f6"; 
+    apexTunnelUrlBox.style.display = "none";
+    apexTunnelUrlText.textContent = "Waiting for connection...";
+    apexSubdomainInput.disabled = false; 
+    apexTokenInput.disabled = false;
+  }
+}
 
 // ---------------------------------------------------------
 // 5. .ENV MANAGEMENT LOGIC

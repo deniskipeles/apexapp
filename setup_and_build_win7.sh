@@ -64,12 +64,39 @@ if [ -z "$ASSET_DOWNLOAD_URL" ] || [ "$ASSET_DOWNLOAD_URL" = "null" ]; then
     echo "⚠️  Could not find Windows binary in latest release of $REPO_NAME. Skipping download."
 else
     echo "📥 Downloading ApexKit from $ASSET_DOWNLOAD_URL..."
-    curl -L "$ASSET_DOWNLOAD_URL" -o "$TARGET_FILE"
+    
+    TEMP_DIR=$(mktemp -d)
+    TEMP_FILE="$TEMP_DIR/downloaded_file"
+
+    HTTP_CODE=$(curl -L -w "%{http_code}" "$ASSET_DOWNLOAD_URL" -o "$TEMP_FILE")
+
+    if [ "$HTTP_CODE" -ne 200 ]; then
+        echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    if [[ "$ASSET_DOWNLOAD_URL" == *.tar.gz ]]; then
+        echo "📦 Extracting .tar.gz archive..."
+        tar -xzf "$TEMP_FILE" -C "$TEMP_DIR"
+        find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+    elif [[ "$ASSET_DOWNLOAD_URL" == *.zip ]]; then
+        echo "📦 Extracting .zip archive..."
+        unzip -q "$TEMP_FILE" -d "$TEMP_DIR"
+        find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
+    else
+        echo "📄 Raw binary detected..."
+        mv "$TEMP_FILE" "$TARGET_FILE"
+    fi
+
     chmod +x "$TARGET_FILE"
-    echo "✅ ApexKit sidecar updated."
+    rm -rf "$TEMP_DIR"
+    echo "✅ ApexKit sidecar updated and ready."
 fi
 
-# Cloudflared
+# ==========================================
+# 5.5 DOWNLOAD CLOUDFLARED (SIDECAR)
+# ==========================================
 CF_WIN_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 CF_TARGET_FILE="${TARGET_DIR}/cloudflared-${TARGET_TRIPLE}.exe"
 
@@ -79,6 +106,23 @@ if [ ! -f "$CF_TARGET_FILE" ]; then
     chmod +x "$CF_TARGET_FILE"
 fi
 echo "✅ Cloudflared sidecar updated."
+
+# ==========================================
+# 5.6 DOWNLOAD FRPC (SIDECAR)
+# ==========================================
+FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+FRPC_TARGET_FILE="${TARGET_DIR}/frpc-x86_64-pc-windows-msvc.exe"
+
+if [ ! -f "$FRPC_TARGET_FILE" ]; then
+    echo "📥 Downloading frpc v${FRP_VER} for Windows..."
+    curl -L "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_windows_amd64.zip" -o frp.zip
+    unzip -q frp.zip
+    mv "frp_${FRP_VER}_windows_amd64/frpc.exe" "$FRPC_TARGET_FILE"
+    chmod +x "$FRPC_TARGET_FILE"
+    rm -rf frp*
+fi
+echo "✅ frpc Windows sidecar updated."
+# ==========================================
 
 # 7. DOWNLOAD & EXTRACT WEBVIEW2 FIXED RUNTIME
 echo "🌐 Preparing WebView2 Fixed Runtime..."
