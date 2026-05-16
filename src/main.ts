@@ -40,9 +40,11 @@ const apexTunnelStatusText = document.querySelector("#apex-tunnel-status-text") 
 const apexTunnelDot = document.querySelector("#apex-tunnel-dot") as HTMLElement;
 const apexTunnelUrlBox = document.querySelector("#apex-tunnel-url-box") as HTMLElement;
 const apexTunnelUrlText = document.querySelector("#apex-tunnel-url-text") as HTMLElement;
-const apexSubdomainInput = document.querySelector("#apex-subdomain-input") as HTMLInputElement;
+const btnCopyApexUrl = document.querySelector("#btn-copy-apex-url") as HTMLButtonElement;
 
-let isApexTunnelRunning = false;
+const apexDomainInput = document.querySelector("#apex-domain-input") as HTMLInputElement;
+const apexTokenInput = document.querySelector("#apex-token-input") as HTMLInputElement;
+const apexServerInput = document.querySelector("#apex-server-input") as HTMLInputElement;
 
 // .env Management Elements
 const envListEl = document.querySelector("#env-list") as HTMLElement;
@@ -315,42 +317,40 @@ btnCopyUrl.addEventListener('click', () => {
 // ---------------------------------------------------------
 // APEX FREE TUNNEL LOGIC
 // ---------------------------------------------------------
-const apexTokenInput = document.querySelector("#apex-token-input") as HTMLInputElement;
+let isApexTunnelRunning = false;
 
 btnToggleApexTunnel.addEventListener('click', async () => {
   if (!isApexTunnelRunning) {
-    // Start
-    const subdomain = apexSubdomainInput.value.trim();
+    const domain = apexDomainInput.value.trim();
     const token = apexTokenInput.value.trim();
+    const server_addr = apexServerInput.value.trim() || "apexkit.io";
 
-    if (!subdomain || !token) {
-        alert("Please enter both your Token and Subdomain.");
+    if (!domain || !token) {
+        alert("Please enter both your Token and Domain/Subdomain.");
         return;
     }
 
     btnToggleApexTunnel.disabled = true;
     btnToggleApexTunnel.textContent = "Starting Tunnel...";
-    apexTunnelStatusText.textContent = "Authenticating...";
+    apexTunnelStatusText.textContent = "Authenticating via WSS...";
     
     // Disable CF Tunnel button to prevent conflicts
     btnToggleTunnel.disabled = true;
 
     try {
-      await invoke("toggle_apex_tunnel", { start: true, subdomain, token });
+      await invoke("toggle_apex_tunnel", { start: true, domain, token, server_addr });
     } catch(err) {
       alert(err);
       updateApexTunnelUI(false);
     }
   } else {
-    // Stop
     isApexTunnelRunning = false;
-    await invoke("toggle_apex_tunnel", { start: false, subdomain: null, token: null });
+    await invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, server_addr: null });
     updateApexTunnelUI(false);
     btnToggleTunnel.disabled = false;
   }
 });
 
-// Listen for successful FRPC connection
 listen("apex-tunnel-connected", (event) => {
   const url = event.payload as string;
   isApexTunnelRunning = true;
@@ -358,13 +358,11 @@ listen("apex-tunnel-connected", (event) => {
   updateApexTunnelUI(true);
 });
 
-// Listen for Rejections
 listen("apex-tunnel-error", (event) => {
   const err = event.payload as string;
   alert("Tunnel Error: " + err);
-  
   isApexTunnelRunning = false;
-  invoke("toggle_apex_tunnel", { start: false, subdomain: null, token: null });
+  invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, server_addr: null });
   updateApexTunnelUI(false);
   btnToggleTunnel.disabled = false;
 });
@@ -378,8 +376,9 @@ function updateApexTunnelUI(running: boolean) {
     btnToggleApexTunnel.textContent = "Stop Tunnel";
     btnToggleApexTunnel.style.backgroundColor = "#ef4444"; 
     apexTunnelUrlBox.style.display = "block";
-    apexSubdomainInput.disabled = true; 
+    apexDomainInput.disabled = true; 
     apexTokenInput.disabled = true;
+    apexServerInput.disabled = true;
   } else {
     apexTunnelStatusText.textContent = "Tunnel Offline";
     apexTunnelStatusText.style.color = "#64748b";
@@ -388,10 +387,18 @@ function updateApexTunnelUI(running: boolean) {
     btnToggleApexTunnel.style.backgroundColor = "#3b82f6"; 
     apexTunnelUrlBox.style.display = "none";
     apexTunnelUrlText.textContent = "Waiting for connection...";
-    apexSubdomainInput.disabled = false; 
+    apexDomainInput.disabled = false; 
     apexTokenInput.disabled = false;
+    apexServerInput.disabled = false;
   }
 }
+
+btnCopyApexUrl.addEventListener('click', () => {
+  navigator.clipboard.writeText(apexTunnelUrlText.textContent || "");
+  const original = btnCopyApexUrl.textContent;
+  btnCopyApexUrl.textContent = "Copied!";
+  setTimeout(() => btnCopyApexUrl.textContent = original, 2000);
+});
 
 // ---------------------------------------------------------
 // 5. .ENV MANAGEMENT LOGIC

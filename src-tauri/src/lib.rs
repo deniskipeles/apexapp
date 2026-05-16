@@ -185,37 +185,47 @@ fn save_env_vars(app: AppHandle, vars: Vec<EnvVar>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_apex_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool, subdomain: Option<String>, token: Option<String>) -> Result<String, String> {
+fn toggle_apex_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool, domain: Option<String>, token: Option<String>, server_addr: Option<String>) -> Result<String, String> {
     let mut tunnel_guard = state.frpc_process.lock().unwrap();
 
-    // STOP TUNNEL
     if !start {
         if let Some(child) = tunnel_guard.take() {
             let _ = child.kill();
-            return Ok("Apex Tunnel Stopped".to_string());
+            return Ok("Tunnel Stopped".to_string());
         }
         return Ok("Tunnel was not running".to_string());
     }
 
-    // START TUNNEL
     if tunnel_guard.is_some() {
         return Ok("Tunnel already running".to_string());
     }
 
-    let sub = subdomain.ok_or("Subdomain is required".to_string())?;
+    let target_domain = domain.ok_or("Domain is required".to_string())?;
     let tok = token.ok_or("Token is required".to_string())?;
+    let srv_addr = server_addr.unwrap_or_else(|| "apexkit.io".to_string());
     
-    // 1. Generate frpc.toml dynamically
+    // INTELLIGENT DETECTION: Agency Mode (Subdomain) vs PaaS Mode (Custom Domain)
+    let is_subdomain = !target_domain.contains('.');
+    let domain_config = if is_subdomain {
+        format!("subdomain = \"{}\"", target_domain)
+    } else {
+        format!("customDomains = [\"{}\"]", target_domain)
+    };
+
     let app_data_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&app_data_dir).map_err(|e| e.to_string())?;
     let config_path = app_data_dir.join("frpc.toml");
     
-    // NOTE: Change serverAddr to your actual FRPS server domain/IP
+    // Generate WSS-based config (Bypasses Firewalls & Supports PaaS LBs)
     let toml_content = format!(r#"
-serverAddr = "frps.apexkit.io"
-serverPort = 7000
+serverAddr = "{}"
+serverPort = 443
 
-# Metadata passed to the FRPS plugin for authentication
+[transport]
+protocol = "wss"
+path = "/_frpc"
+tls.enable = true
+
 [metas]
 token = "{}"
 
@@ -223,12 +233,11 @@ token = "{}"
 name = "apexkit-tunnel-{}"
 type = "http"
 localPort = 5000
-subdomain = "{}"
-"#, tok, sub, sub);
+{}
+"#, srv_addr, tok, uuid::Uuid::new_v4().to_string().replace("-", "")[0..8].to_string(), domain_config);
 
     std::fs::write(&config_path, toml_content).map_err(|e| e.to_string())?;
 
-    // 2. Spawn FRPC Sidecar
     let sidecar = app.shell()
         .sidecar("frpc").map_err(|e| e.to_string())?
         .args(["-c", config_path.to_str().unwrap()]);
@@ -236,20 +245,25 @@ subdomain = "{}"
     let (mut rx, child) = sidecar.spawn().map_err(|e| e.to_string())?;
     *tunnel_guard = Some(child);
 
-    // 3. Background Listener for logs
+    // Calculate final URL for the UI
+    let final_url = if is_subdomain {
+        format!("https://{}.{}", target_domain, srv_addr)
+    } else {
+        format!("https://{}", target_domain)
+    };
+
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line_bytes) | CommandEvent::Stderr(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes);
-                    let _ = app.emit("sidecar-log", format!("[ApexTunnel] {}", line));
+                    let _ = app.emit("sidecar-log", format!("[Tunnel] {}", line));
 
-                    // Detection logic for success/failure
                     if line.contains("start proxy success") {
-                        let _ = app.emit("apex-tunnel-connected", format!("https://{}.apexkit.io", sub));
+                        let _ = app.emit("apex-tunnel-connected", final_url.clone());
                     }
-                    if line.contains("Unauthorized") || line.contains("Token is not authorized") {
-                         let _ = app.emit("apex-tunnel-error", "Invalid Token or Subdomain mismatch.");
+                    if line.contains("Unauthorized") || line.contains("not authorized") {
+                         let _ = app.emit("apex-tunnel-error", "Invalid Token or Domain mismatch.");
                     }
                 }
                 _ => {}
@@ -257,7 +271,7 @@ subdomain = "{}"
         }
     });
 
-    Ok("Starting Apex Tunnel...".to_string())
+    Ok("Starting Tunnel...".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

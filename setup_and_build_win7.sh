@@ -33,7 +33,7 @@ if ! command -v xwin &> /dev/null; then cargo install xwin; fi
 # 4. Prepare xwin (SDK/CRT)
 if [ ! -d "xwin" ]; then
     echo "📥 Downloading Windows SDK/CRT via xwin..."
-    xwin --accept-license splat --output xwin
+    yes yes | xwin splat --output xwin
 fi
 
 # 5. Configure Linker for Win7 Target
@@ -52,12 +52,11 @@ mkdir -p "$TARGET_DIR"
 # ApexKit
 SIDECAR_NAME="apexkit"
 REPO_OWNER="deniskipeles"
-REPO_NAME="apex-kit"
+REPO_NAME="apexkit" # Fixed from apex-kit
 TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-${TARGET_TRIPLE}.exe"
 
 echo "🔍 Fetching latest Windows release metadata for ApexKit..."
 RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
-# Improved JQ query to handle nulls and fetch download URL
 ASSET_DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets // [] | .[] | select(.name | contains("windows") or contains("pc-windows-msvc")) | .browser_download_url' | head -n 1)
 
 if [ -z "$ASSET_DOWNLOAD_URL" ] || [ "$ASSET_DOWNLOAD_URL" = "null" ]; then
@@ -91,12 +90,10 @@ else
 
     chmod +x "$TARGET_FILE"
     rm -rf "$TEMP_DIR"
-    echo "✅ ApexKit sidecar updated and ready."
+    echo "✅ ApexKit sidecar updated."
 fi
 
-# ==========================================
-# 5.5 DOWNLOAD CLOUDFLARED (SIDECAR)
-# ==========================================
+# Cloudflared
 CF_WIN_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 CF_TARGET_FILE="${TARGET_DIR}/cloudflared-${TARGET_TRIPLE}.exe"
 
@@ -107,11 +104,9 @@ if [ ! -f "$CF_TARGET_FILE" ]; then
 fi
 echo "✅ Cloudflared sidecar updated."
 
-# ==========================================
-# 5.6 DOWNLOAD FRPC (SIDECAR)
-# ==========================================
+# FRPC
 FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-FRPC_TARGET_FILE="${TARGET_DIR}/frpc-x86_64-pc-windows-msvc.exe"
+FRPC_TARGET_FILE="${TARGET_DIR}/frpc-${TARGET_TRIPLE}.exe"
 
 if [ ! -f "$FRPC_TARGET_FILE" ]; then
     echo "📥 Downloading frpc v${FRP_VER} for Windows..."
@@ -122,28 +117,29 @@ if [ ! -f "$FRPC_TARGET_FILE" ]; then
     rm -rf frp*
 fi
 echo "✅ frpc Windows sidecar updated."
-# ==========================================
 
 # 7. DOWNLOAD & EXTRACT WEBVIEW2 FIXED RUNTIME
 echo "🌐 Preparing WebView2 Fixed Runtime..."
 WEBVIEW_DIR="src-tauri/webview2"
 FIXED_PATH="$WEBVIEW_DIR/fixed"
+mkdir -p "$FIXED_PATH"
 
-if [ ! -d "$FIXED_PATH" ] || [ -z "$(ls -A "$FIXED_PATH")" ]; then
-    mkdir -p "$FIXED_PATH"
+# FIX: Explicitly check for the executable to bypass the .gitkeep issue!
+if [ ! -f "$FIXED_PATH/msedgewebview2.exe" ]; then
     if command -v cabextract &> /dev/null; then
         echo "📥 Downloading WebView2 CAB..."
         curl -L -o "webview2.cab" "$WEBVIEW2_CAB_URL"
         echo "📂 Extracting Fixed Runtime..."
         cabextract -d "$FIXED_PATH" "webview2.cab"
 
+        # Flatten structure if the CAB extracted to a subfolder
         SUBFOLDER=$(find "$FIXED_PATH" -maxdepth 1 -type d -name "Microsoft.WebView2.*" | head -n 1)
         if [ -n "$SUBFOLDER" ]; then
             echo "🧹 Flattening directory structure..."
             mv "$SUBFOLDER"/* "$FIXED_PATH/"
             rmdir "$SUBFOLDER"
         fi
-        rm "webview2.cab"
+        rm -f "webview2.cab"
         echo "✅ WebView2 Fixed Runtime ready."
     else
         echo "❌ cabextract not found! Cannot extract WebView2."
@@ -162,10 +158,12 @@ rm -f src-tauri/Cargo.lock
 echo "🛠️ Patching tauri.conf.json for Windows 7 build..."
 cp src-tauri/tauri.conf.json src-tauri/tauri.conf.json.bak
 
-# Inject the webviewInstallMode and update productName
-jq '.bundle.windows.webviewInstallMode = {
+# FIX: Use absolute path so Tauri doesn't get confused resolving relative paths during cross-compilation
+FIXED_ABS_PATH="$(cd src-tauri/webview2/fixed && pwd)"
+
+jq --arg p "$FIXED_ABS_PATH" '.bundle.windows.webviewInstallMode = {
   "type": "fixedRuntime",
-  "path": "./webview2/fixed/"
+  "path": $p
 } | .productName = "apexapp-win7"' src-tauri/tauri.conf.json > temp_tauri_conf.json && mv temp_tauri_conf.json src-tauri/tauri.conf.json
 
 # Build

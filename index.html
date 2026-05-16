@@ -77,18 +77,26 @@
 
           <!-- ApexKit Tunnel Card -->
           <section class="settings-card">
-            <h2>🚀 ApexKit Managed Tunnel</h2>
-            <p>Get a permanent, secure public URL on the <b>*.apexkit.io</b> network.</p>
+            <h2>🚀 Managed Public Tunnel (FRP)</h2>
+            <p>Connect to an Agency network (e.g., <code>apexkit.io</code>) or your own free PaaS server (e.g., <code>my-app.koyeb.app</code>).</p>
 
-            <div style="margin-bottom: 15px; margin-top: 15px;">
-              <label style="font-size: 0.8rem; color: #64748b; font-weight: bold;">Tunnel Token</label>
-              <input id="apex-token-input" type="password" placeholder="Enter your 24-character token" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #cbd5e1; margin-top: 4px; outline: none;" />
+            <div style="margin-bottom: 15px; margin-top: 15px; display: flex; flex-direction: column; gap: 10px;">
               
-              <label style="font-size: 0.8rem; color: #64748b; font-weight: bold; margin-top: 10px; display: block;">Authorized Subdomain</label>
-              <div style="display: flex; align-items: center; gap: 5px; margin-top: 4px;">
-                  <input id="apex-subdomain-input" placeholder="my-awesome-app" style="flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #cbd5e1; outline: none;" />
-                  <span style="font-family: monospace; color: #64748b; font-weight: bold;">.apexkit.io</span>
+              <div>
+                <label style="font-size: 0.8rem; color: #64748b; font-weight: bold;">Server Address</label>
+                <input id="apex-server-input" value="apexkit.io" placeholder="e.g. apexkit.io or my-tunnel.koyeb.app" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #cbd5e1; outline: none;" />
               </div>
+
+              <div>
+                <label style="font-size: 0.8rem; color: #64748b; font-weight: bold;">Domain or Subdomain</label>
+                <input id="apex-domain-input" placeholder="e.g. 'joes-app' (Agency) OR 'my-tunnel.koyeb.app' (PaaS)" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #cbd5e1; outline: none;" />
+              </div>
+
+              <div>
+                <label style="font-size: 0.8rem; color: #64748b; font-weight: bold;">Tunnel Token</label>
+                <input id="apex-token-input" type="password" placeholder="Enter the 24-character token provided by the server" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #cbd5e1; outline: none;" />
+              </div>
+
             </div>
 
             <div class="tunnel-box">
