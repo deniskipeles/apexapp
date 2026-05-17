@@ -220,14 +220,10 @@ fn toggle_apex_tunnel(app: AppHandle, state: State<'_, ApexState>, start: bool, 
     let toml_content = format!(r#"
 serverAddr = "{}"
 serverPort = 443
+user = "{}"
 
 [transport]
 protocol = "wss"
-path = "/_frpc"
-tls.enable = true
-
-[metas]
-token = "{}"
 
 [[proxies]]
 name = "apexkit-tunnel-{}"

@@ -124,16 +124,9 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	frpVhostProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", vhostPort)})
 	adminApiProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", pluginPort)})
 
-	// Critical: Preserve Original Host header so FRPS knows which subdomain to route to
-	originalVhostDirector := frpVhostProxy.Director
-	frpVhostProxy.Director = func(req *http.Request) {
-		originalVhostDirector(req)
-		req.Host = req.Header.Get("Host")
-	}
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// 1. Route FRPC WebSocket connections
-		if r.URL.Path == "/_frpc" {
+		if r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" || r.URL.Path == "/_frpc" {
 			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
@@ -142,7 +135,14 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
-		// 3. Route all other traffic to FRP VHost (Tauri App)
+		
+		// 3. Route to FRP VHost
+		// CRITICAL FIX: Ensure the correct external Host is passed to FRPS
+		// Check for PaaS load balancer headers first
+		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+			r.Host = forwardedHost
+		}
+		
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
@@ -167,9 +167,8 @@ func startWebhookServer(port int) {
 
 			var token string
 			if userObj, ok := req.Content["user"].(map[string]interface{}); ok {
-				if metas, ok := userObj["metas"].(map[string]interface{}); ok {
-					token, _ = metas["token"].(string)
-				}
+				// Simply extract the token from the standard "user" field
+				token, _ = userObj["user"].(string)
 			}
 
 			var dbDomain string

@@ -80,6 +80,22 @@ interface EnvVar {
 }
 let envVars: EnvVar[] = [];
 
+
+// --- DYNAMIC URL RESOLVER ---
+function getBaseUrl() {
+  // If we are in a normal browser running over a tunnel/network (HTTPS or not localhost)
+  if (
+    window.location.protocol === 'https:' || 
+    (window.location.hostname !== 'localhost' && window.location.hostname !== 'tauri.localhost' && window.location.hostname !== '127.0.0.1')
+  ) {
+    return window.location.origin;
+  }
+  // Fallback for Tauri App / Local Dev
+  return "http://localhost:5000";
+}
+
+const API_BASE = getBaseUrl();
+
 // ---------------------------------------------------------
 // 1. INITIALIZATION & VIEW SWITCHING
 // ---------------------------------------------------------
@@ -172,7 +188,8 @@ function setServerRunningState() {
 async function waitForServer(retries = 30) {
   for (let i = 0; i < retries; i++) {
     try {
-      const response = await fetch("http://localhost:5000/", { method: 'HEAD' });
+      // CHANGED: Use API_BASE instead of hardcoded URL
+      const response = await fetch(`${API_BASE}/`, { method: 'HEAD' });
       if (response.ok || response.status === 401 || response.status === 403) return true;
     } catch (e) { /* wait */ }
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -187,7 +204,8 @@ async function waitForServer(retries = 30) {
 function handleContentDisplay(viewName: 'app' | 'dash') {
   if (!isServerRunning) return;
   const useNewWindow = windowModeToggle.checked;
-  const baseUrl = "http://localhost:5000";
+  // CHANGED: Use API_BASE
+  const baseUrl = API_BASE;
 
   if (viewName === 'app') {
     if (useNewWindow) {
@@ -323,7 +341,7 @@ btnToggleApexTunnel.addEventListener('click', async () => {
   if (!isApexTunnelRunning) {
     const domain = apexDomainInput.value.trim();
     const token = apexTokenInput.value.trim();
-    const server_addr = apexServerInput.value.trim() || "apexkit.io";
+    const serverAddrValue = apexServerInput.value.trim() || "apexkit.io"; // Renamed variable
 
     if (!domain || !token) {
         alert("Please enter both your Token and Domain/Subdomain.");
@@ -338,14 +356,16 @@ btnToggleApexTunnel.addEventListener('click', async () => {
     btnToggleTunnel.disabled = true;
 
     try {
-      await invoke("toggle_apex_tunnel", { start: true, domain, token, server_addr });
+      // FIX: Use serverAddr to match Tauri's camelCase expectation
+      await invoke("toggle_apex_tunnel", { start: true, domain, token, serverAddr: serverAddrValue });
     } catch(err) {
       alert(err);
       updateApexTunnelUI(false);
     }
   } else {
     isApexTunnelRunning = false;
-    await invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, server_addr: null });
+    // FIX: Use serverAddr here too
+    await invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, serverAddr: null });
     updateApexTunnelUI(false);
     btnToggleTunnel.disabled = false;
   }
@@ -362,7 +382,8 @@ listen("apex-tunnel-error", (event) => {
   const err = event.payload as string;
   alert("Tunnel Error: " + err);
   isApexTunnelRunning = false;
-  invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, server_addr: null });
+  // FIX: Use serverAddr here too
+  invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, serverAddr: null });
   updateApexTunnelUI(false);
   btnToggleTunnel.disabled = false;
 });
@@ -515,7 +536,8 @@ btnSaveEnv.addEventListener("click", async () => {
 // 6. MISC
 // ---------------------------------------------------------
 async function fetchBranding() {
-  const baseUrl = "http://localhost:5000";
+  // CHANGED: Use API_BASE
+  const baseUrl = API_BASE;
   try {
     const res = await fetch(`${baseUrl}/app-name`);
     if (res.ok) {
