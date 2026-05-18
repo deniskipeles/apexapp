@@ -76,7 +76,9 @@ func main() {
 	}
 
 	go startFRPS()
-	go startWebhookServer(*pluginPort)
+	
+	// PASS PAAS_MODE TO WEBHOOK SERVER
+	go startWebhookServer(*pluginPort, *paasMode)
 
 	// Setup Multiplexer (Routes Traffic to Webhook, FRPC WebSocket, or VHost)
 	mux := http.NewServeMux()
@@ -93,7 +95,6 @@ func main() {
 		certManager := autocert.Manager{
 			Prompt: autocert.AcceptTOS,
 			HostPolicy: func(ctx context.Context, host string) error {
-				// Allow the base domain (for API & WSS) AND subdomains (for tunnels)
 				if host == *domain || strings.HasSuffix(host, "."+*domain) {
 					return nil
 				}
@@ -117,6 +118,87 @@ func main() {
 			log.Fatalf("HTTPS server failed: %v", err)
 		}
 	}
+}
+
+func startWebhookServer(port int, isPaas bool) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/frp-hook", func(w http.ResponseWriter, r *http.Request) {
+		var req FrpRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		resp := FrpResponse{Reject: true, RejectReason: "Unauthorized"}
+
+		if req.Op == "NewProxy" {
+			requestedDomain := ""
+			
+			if sub, ok := req.Content["subdomain"].(string); ok && sub != "" {
+				requestedDomain = sub
+			} else if customDoms, ok := req.Content["custom_domains"].([]interface{}); ok && len(customDoms) > 0 {
+				requestedDomain = customDoms[0].(string)
+			}
+
+			var token string
+			if userObj, ok := req.Content["user"].(map[string]interface{}); ok {
+				token, _ = userObj["user"].(string)
+			}
+
+			// PAAS MODE: Bypass SQLite, use ADMIN_KEY permanently
+			if isPaas {
+				if token == adminKey {
+					resp.Reject = false
+					resp.Unchange = true
+					log.Printf("✅ Authorized PaaS tunnel: %s", requestedDomain)
+				} else {
+					resp.RejectReason = "Invalid Token (Expected ADMIN_KEY)"
+				}
+			} else {
+				// AGENCY MODE: Use SQLite Token Registry
+				var dbDomain string
+				err := db.QueryRow("SELECT domain FROM tunnel_tokens WHERE token = ?", token).Scan(&dbDomain)
+				
+				if err == sql.ErrNoRows {
+					resp.RejectReason = "Invalid or missing token"
+				} else if err != nil {
+					resp.RejectReason = "Internal Server Error"
+				} else if dbDomain != requestedDomain {
+					resp.RejectReason = fmt.Sprintf("Token not authorized for domain '%s'", requestedDomain)
+				} else {
+					resp.Reject = false
+					resp.Unchange = true
+					log.Printf("✅ Authorized Agency tunnel: %s", requestedDomain)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+adminKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var payload struct { Domain string `json:"domain"` }
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		// If PaaS Mode, just return the ADMIN_KEY so it doesn't try to write to SQLite
+		if isPaas {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"token": adminKey, "domain": payload.Domain})
+			return
+		}
+
+		token := generateRandomToken(24)
+		_, err := db.Exec("INSERT INTO tunnel_tokens (token, domain) VALUES (?, ?)", token, payload.Domain)
+		if err != nil {
+			http.Error(w, "Domain already claimed", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"token": token, "domain": payload.Domain})
+	})
+
+	http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
@@ -145,70 +227,6 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		
 		frpVhostProxy.ServeHTTP(w, r)
 	})
-}
-
-func startWebhookServer(port int) {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/frp-hook", func(w http.ResponseWriter, r *http.Request) {
-		var req FrpRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		resp := FrpResponse{Reject: true, RejectReason: "Unauthorized"}
-
-		if req.Op == "NewProxy" {
-			requestedDomain := ""
-			
-			// Extract either subdomain (Agency Mode) or custom domain (PaaS Mode)
-			if sub, ok := req.Content["subdomain"].(string); ok && sub != "" {
-				requestedDomain = sub
-			} else if customDoms, ok := req.Content["custom_domains"].([]interface{}); ok && len(customDoms) > 0 {
-				requestedDomain = customDoms[0].(string)
-			}
-
-			var token string
-			if userObj, ok := req.Content["user"].(map[string]interface{}); ok {
-				// Simply extract the token from the standard "user" field
-				token, _ = userObj["user"].(string)
-			}
-
-			var dbDomain string
-			err := db.QueryRow("SELECT domain FROM tunnel_tokens WHERE token = ?", token).Scan(&dbDomain)
-			
-			if err == sql.ErrNoRows {
-				resp.RejectReason = "Invalid or missing token"
-			} else if err != nil {
-				resp.RejectReason = "Internal Server Error"
-			} else if dbDomain != requestedDomain {
-				resp.RejectReason = fmt.Sprintf("Token not authorized for domain '%s'", requestedDomain)
-			} else {
-				resp.Reject = false
-				resp.Unchange = true
-				log.Printf("✅ Authorized tunnel: %s", requestedDomain)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	})
-
-	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+adminKey {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		var payload struct { Domain string `json:"domain"` }
-		json.NewDecoder(r.Body).Decode(&payload)
-
-		token := generateRandomToken(24)
-		_, err := db.Exec("INSERT INTO tunnel_tokens (token, domain) VALUES (?, ?)", token, payload.Domain)
-		if err != nil {
-			http.Error(w, "Domain already claimed", http.StatusConflict)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"token": token, "domain": payload.Domain})
-	})
-
-	http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }
 
 func initDB() {

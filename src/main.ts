@@ -283,12 +283,32 @@ listen("tunnel-url", (event) => {
 });
 
 // Listen for Managed Tunnel Connection
-listen("tunnel-managed-connected", () => {
+listen("tunnel-managed-connected", async () => {
   if (isCustomDomain) {
     console.log("Managed Tunnel Connected");
     isTunnelRunning = true;
     tunnelUrlText.textContent = "Custom Domain Active (Managed via Cloudflare)";
     updateTunnelUI(true);
+
+    // AUTO-SAVE CF TOKEN TO .ENV ON SUCCESS
+    const token = cfTokenInput.value.trim();
+    if (token) {
+      const updateOrAdd = (k: string, v: string) => {
+          const idx = envVars.findIndex(e => e.key === k);
+          if (idx !== -1) envVars[idx].value = v;
+          else envVars.push({ key: k, value: v });
+      };
+
+      updateOrAdd("CF_TUNNEL_TOKEN", token);
+
+      try {
+          const validVars = envVars.filter(e => e.key.trim() !== "");
+          await invoke("save_env_vars", { vars: validVars });
+          renderEnvVars(); // Refresh the UI list to show the new variable
+      } catch (err) {
+          console.error("Failed to auto-save CF tunnel token to .env:", err);
+      }
+    }
   }
 });
 
@@ -341,7 +361,7 @@ btnToggleApexTunnel.addEventListener('click', async () => {
   if (!isApexTunnelRunning) {
     const domain = apexDomainInput.value.trim();
     const token = apexTokenInput.value.trim();
-    const serverAddrValue = apexServerInput.value.trim() || "apexkit.io"; // Renamed variable
+    const serverAddrValue = apexServerInput.value.trim() || "apexkit.io"; 
 
     if (!domain || !token) {
         alert("Please enter both your Token and Domain/Subdomain.");
@@ -351,12 +371,9 @@ btnToggleApexTunnel.addEventListener('click', async () => {
     btnToggleApexTunnel.disabled = true;
     btnToggleApexTunnel.textContent = "Starting Tunnel...";
     apexTunnelStatusText.textContent = "Authenticating via WSS...";
-    
-    // Disable CF Tunnel button to prevent conflicts
     btnToggleTunnel.disabled = true;
 
     try {
-      // FIX: Use serverAddr to match Tauri's camelCase expectation
       await invoke("toggle_apex_tunnel", { start: true, domain, token, serverAddr: serverAddrValue });
     } catch(err) {
       alert(err);
@@ -364,25 +381,46 @@ btnToggleApexTunnel.addEventListener('click', async () => {
     }
   } else {
     isApexTunnelRunning = false;
-    // FIX: Use serverAddr here too
     await invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, serverAddr: null });
     updateApexTunnelUI(false);
     btnToggleTunnel.disabled = false;
   }
 });
 
-listen("apex-tunnel-connected", (event) => {
+listen("apex-tunnel-connected", async (event) => {
   const url = event.payload as string;
   isApexTunnelRunning = true;
   apexTunnelUrlText.textContent = url;
   updateApexTunnelUI(true);
+
+  // AUTO-SAVE SETTINGS TO .ENV ON SUCCESS
+  const serverAddr = apexServerInput.value.trim();
+  const domain = apexDomainInput.value.trim();
+  const token = apexTokenInput.value.trim();
+
+  const updateOrAdd = (k: string, v: string) => {
+      const idx = envVars.findIndex(e => e.key === k);
+      if (idx !== -1) envVars[idx].value = v;
+      else envVars.push({ key: k, value: v });
+  };
+
+  updateOrAdd("APEX_TUNNEL_SERVER", serverAddr);
+  updateOrAdd("APEX_TUNNEL_DOMAIN", domain);
+  updateOrAdd("APEX_TUNNEL_TOKEN", token);
+
+  try {
+      const validVars = envVars.filter(e => e.key.trim() !== "");
+      await invoke("save_env_vars", { vars: validVars });
+      renderEnvVars(); // refresh the UI list to show the new variables
+  } catch (err) {
+      console.error("Failed to auto-save tunnel settings to .env:", err);
+  }
 });
 
 listen("apex-tunnel-error", (event) => {
   const err = event.payload as string;
   alert("Tunnel Error: " + err);
   isApexTunnelRunning = false;
-  // FIX: Use serverAddr here too
   invoke("toggle_apex_tunnel", { start: false, domain: null, token: null, serverAddr: null });
   updateApexTunnelUI(false);
   btnToggleTunnel.disabled = false;
@@ -429,9 +467,23 @@ async function loadEnvVars() {
   try {
     envVars = await invoke("get_env_vars");
     renderEnvVars();
+    populateTunnelInputs(); // NEW: Auto-fill UI
   } catch (err) {
     console.error("Failed to load .env", err);
   }
+}
+
+// NEW: Pre-fills the Apex Tunnel inputs if they were saved previously
+function populateTunnelInputs() {
+  const serverEnv = envVars.find(e => e.key === "APEX_TUNNEL_SERVER");
+  const domainEnv = envVars.find(e => e.key === "APEX_TUNNEL_DOMAIN");
+  const tokenEnv = envVars.find(e => e.key === "APEX_TUNNEL_TOKEN");
+  const cfTokenEnv = envVars.find(e => e.key === "CF_TUNNEL_TOKEN"); 
+
+  if (serverEnv) apexServerInput.value = serverEnv.value;
+  if (domainEnv) apexDomainInput.value = domainEnv.value;
+  if (tokenEnv) apexTokenInput.value = tokenEnv.value;
+  if (cfTokenEnv) cfTokenInput.value = cfTokenEnv.value; 
 }
 
 function renderEnvVars() {
@@ -493,14 +545,12 @@ btnAddEnv.addEventListener("click", () => {
   const key = envKeyInput.value.trim();
   const val = envValInput.value.trim();
   if (key) {
-    // Overwrite if key already exists, otherwise add
     const existingIndex = envVars.findIndex(e => e.key === key);
     if (existingIndex !== -1) {
         envVars[existingIndex].value = val;
     } else {
         envVars.push({ key, value: val });
     }
-    
     envKeyInput.value = "";
     envValInput.value = "";
     renderEnvVars();
@@ -512,18 +562,14 @@ btnSaveEnv.addEventListener("click", async () => {
     const originalText = btnSaveEnv.textContent;
     btnSaveEnv.textContent = "Saving...";
     btnSaveEnv.disabled = true;
-    
-    // Filter out empty keys before saving
     const validVars = envVars.filter(e => e.key.trim() !== "");
     await invoke("save_env_vars", { vars: validVars });
-    
     btnSaveEnv.textContent = "Saved!";
     setTimeout(() => {
        btnSaveEnv.textContent = originalText;
        btnSaveEnv.disabled = false;
     }, 2000);
-    
-    loadEnvVars(); // Refresh to normalize visual state
+    loadEnvVars(); 
   } catch (err) {
     console.error(err);
     alert("Failed to save .env file");
