@@ -23,7 +23,7 @@ RUN mkdir -p /app/certs
 # 80, 443 : Agency Mode (Auto-TLS)
 # 7000    : Internal FRPC WebSocket connections
 # 8000    : Default PaaS Mode HTTP Port
-EXPOSE 80 443 7000 8000
+EXPOSE 80 443 7000 8000 8080 8081
 
 # Default command. Arguments/Env Vars control the mode.
 CMD ["./apex-tunnel-server"]
