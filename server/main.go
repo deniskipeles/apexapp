@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -84,7 +83,7 @@ func main() {
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
-		log.Printf("⚠️  System PORT and internal vhost-port collided. Shifted vhost-port to %d", *vhostPort)
+		log.Printf("⚠️  System PORT collided. Shifted vhost-port to %d", *vhostPort)
 	}
 
 	adminKey = os.Getenv("ADMIN_KEY")
@@ -138,64 +137,6 @@ func main() {
 	}
 }
 
-// proxyWebSocket manually hijacks the TCP connection, flushes the memory buffer, and proxies to FRP
-func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
-	backend, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
-	if err != nil {
-		http.Error(w, "backend offline", http.StatusBadGateway)
-		return
-	}
-	defer backend.Close()
-
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	conn, bufrw, err := hj.Hijack()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer conn.Close()
-
-	// 1. Manually craft the perfect WebSocket Upgrade request
-	uri := r.URL.Path
-	if r.URL.RawQuery != "" {
-		uri += "?" + r.URL.RawQuery
-	}
-	reqLine := fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, uri)
-	backend.Write([]byte(reqLine))
-
-	// 2. Force the required WebSocket headers (Bypasses Render stripping)
-	r.Header.Set("Connection", "Upgrade")
-	r.Header.Set("Upgrade", "websocket")
-	r.Header.Write(backend)
-	backend.Write([]byte("\r\n")) // End of headers
-
-	errc := make(chan error, 2)
-
-	// Stream backend to client
-	go func() {
-		_, err := io.Copy(conn, backend)
-		errc <- err
-	}()
-
-	// Stream client to backend
-	go func() {
-		// 🚨 THE CRITICAL FIX: Flush trapped bytes! 🚨
-		// If Render sent early websocket frames, they are trapped in Go's buffer.
-		// We MUST push them to frps before streaming the raw socket, otherwise frps crashes!
-		if bufrw.Reader.Buffered() > 0 {
-			io.CopyN(backend, bufrw.Reader, int64(bufrw.Reader.Buffered()))
-		}
-		_, err := io.Copy(backend, conn)
-		errc <- err
-	}()
-
-	<-errc
-}
-
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
@@ -203,6 +144,7 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+		
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			if err == context.Canceled || err == io.EOF {
 				return
@@ -211,22 +153,35 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			if strings.Contains(errStr, "use of closed network connection") || strings.Contains(errStr, "connection reset") {
 				return
 			}
+			if strings.Contains(errStr, "connection refused") {
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
+				return
+			}
+			log.Printf("http: proxy error on port %d: %v", targetPort, err)
 		}
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Detect WebSocket reliably by checking for the Secret Key (which Render never strips)
-		isWebSocket := r.Header.Get("Sec-Websocket-Key") != ""
+		isWebSocket := r.Header.Get("Sec-Websocket-Key") != "" || r.Header.Get("Sec-WebSocket-Key") != ""
 
-		// Route FRP Control Connections to TCP Port (7000) using the Custom Hijacker
+		// Route FRP Control Connections to TCP Port (7000) natively
 		isControlPath := r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp"
 
 		if isWebSocket && isControlPath {
-			proxyWebSocket(w, r, frpPort)
+			// 🚨 THE SILVER BULLET 🚨
+			// Render stripped the original Upgrade headers. We MUST manually put them back.
+			// When Go's native ReverseProxy sees these, it automatically triggers its internal WebSocket engine!
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Upgrade", "websocket")
+			
+			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
 
