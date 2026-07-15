@@ -216,25 +216,14 @@ func startWebhookServer(port int, isPaas bool) {
 	http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }
 
-// proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
-// proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
+// proxyWebSocket bypasses Go and PaaS header-stripping to forge a perfect WebSocket handshake
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
 	backend, err := net.Dial("tcp", target)
 	if err != nil {
-		log.Printf("❌ proxyWebSocket: Failed to dial port %d", targetPort)
 		http.Error(w, "backend offline", http.StatusBadGateway)
 		return
 	}
-
-	// 🚨 THE CRITICAL FIX 🚨
-	// Render and Cloudflare strip these hop-by-hop headers.
-	// We MUST restore them here, or FRP's strict parser will hang up immediately.
-	r.Header.Set("Connection", "Upgrade")
-	r.Header.Set("Upgrade", "websocket")
-	
-	// Clear RequestURI so Go synthesizes a perfectly clean, relative path (e.g., GET /~!frp HTTP/1.1)
-	r.RequestURI = ""
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -249,14 +238,35 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 		return
 	}
 
-	// Write the cleanly forged request directly to frps
-	if err := r.Write(backend); err != nil {
-		backend.Close()
-		conn.Close()
-		return
+	// 🚨 CRITICAL FIX: Manually craft a pristine HTTP/1.1 WebSocket Upgrade request.
+	// This guarantees frps receives the exact headers it expects, bypassing Render's stripping.
+	uri := r.URL.Path
+	if r.URL.RawQuery != "" {
+		uri += "?" + r.URL.RawQuery
 	}
 
-	// Stream the bytes bidirectionally
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, uri))
+	builder.WriteString(fmt.Sprintf("Host: %s\r\n", r.Host))
+	builder.WriteString("Connection: Upgrade\r\n") // Force the stripped header
+	builder.WriteString("Upgrade: websocket\r\n")  // Force the stripped header
+
+	// Forward the rest of the client's headers (like Sec-WebSocket-Key)
+	for k, vv := range r.Header {
+		lowerK := strings.ToLower(k)
+		if lowerK == "connection" || lowerK == "upgrade" || lowerK == "host" {
+			continue
+		}
+		for _, v := range vv {
+			builder.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+		}
+	}
+	builder.WriteString("\r\n")
+
+	// Write the perfectly forged request to frps
+	backend.Write([]byte(builder.String()))
+
+	// Stream bi-directionally
 	go func() {
 		defer backend.Close()
 		defer conn.Close()
@@ -270,7 +280,6 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -288,27 +297,22 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 				strings.Contains(errStr, "broken pipe") {
 				return
 			}
-			if strings.Contains(errStr, "connect: connection refused") {
-				w.Header().Set("Retry-After", "2")
-				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
-				return
-			}
 			log.Printf("http: proxy error: %v", err)
 		}
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+		// Detect WebSockets ignoring the missing "Connection" header
+		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 
-		// 1. Route FRP Control Connections natively to TCP Port (7000)
+		// 1. Route FRP Control Connections to TCP Port (7000) using the Custom Hijacker
 		// This now properly catches the root path "/" used by the desktop app
 		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			frpWsProxy.ServeHTTP(w, r)
+			proxyWebSocket(w, r, frpPort)
 			return
 		}
 
