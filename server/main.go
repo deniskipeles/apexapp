@@ -215,8 +215,46 @@ func startWebhookServer(port int, isPaas bool) {
 	http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }
 
+// proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
+func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
+	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	backend, err := net.Dial("tcp", target)
+	if err != nil {
+		http.Error(w, "backend offline", http.StatusBadGateway)
+		return
+	}
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		backend.Close()
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	conn, _, err := hj.Hijack()
+	if err != nil {
+		backend.Close()
+		http.Error(w, "hijack failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Forward the exact, unmodified HTTP WebSocket handshake to frps
+	r.Write(backend)
+
+	// Stream the raw bytes bidirectionally
+	go func() {
+		defer backend.Close()
+		defer conn.Close()
+		io.Copy(backend, conn)
+	}()
+	go func() {
+		defer backend.Close()
+		defer conn.Close()
+		io.Copy(conn, backend)
+	}()
+}
+
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Helper function to create a clean reverse proxy
+	// Helper function for normal HTTP traffic
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -225,7 +263,6 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			// 1. Silence harmless client disconnects
 			if err == context.Canceled || err == io.EOF {
 				return
 			}
@@ -235,46 +272,36 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 				strings.Contains(errStr, "broken pipe") {
 				return
 			}
-			// 2. Handle 2-second startup delay gracefully
 			if strings.Contains(errStr, "connect: connection refused") {
 				w.Header().Set("Retry-After", "2")
-				http.Error(w, "Tunnel engine is warming up, please refresh in a moment...", http.StatusServiceUnavailable)
+				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
 				return
 			}
 			log.Printf("http: proxy error: %v", err)
 		}
-
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Detect if this is a WebSocket Upgrade
-		isWebSocket := false
-		for _, val := range r.Header.Values("Upgrade") {
-			if strings.ToLower(val) == "websocket" {
-				isWebSocket = true
-				break
-			}
-		}
+		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// 2. Route FRPC Control Connections to Port 7000
-		// (Catches the default WSS path "/" as well as explicit FRP paths)
+		// 1. Route FRP Control Connections using the Raw TCP Hijacker
+		// (This catches default '/' path and all known FRP websocket paths)
 		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			frpWsProxy.ServeHTTP(w, r)
+			proxyWebSocket(w, r, frpPort)
 			return
 		}
 
-		// 3. Route Admin API
+		// 2. Route Admin API
 		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 4. Route normal HTTP Website Traffic to Port 8081
+		// 3. Route normal HTTP Website Traffic to VHost
 		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
 			r.Host = forwardedHost
 		}
