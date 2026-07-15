@@ -279,6 +279,40 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 	}()
 }
 
+func pipeToFrps(w http.ResponseWriter, r *http.Request, targetPort int) {
+    backend, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+    if err != nil {
+        http.Error(w, "backend offline", http.StatusBadGateway)
+        return
+    }
+    hj, ok := w.(http.Hijacker)
+    if !ok {
+        backend.Close()
+        http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+        return
+    }
+    conn, buf, err := hj.Hijack()
+    if err != nil {
+        backend.Close()
+        http.Error(w, "hijack failed", http.StatusInternalServerError)
+        return
+    }
+
+    // Reconstruct the original raw HTTP request and forward it verbatim
+    // including whatever frpc already sent — don't inject new headers
+    r.Write(backend)
+
+    // Drain any already-buffered bytes from the hijacked conn
+    if buf.Reader.Buffered() > 0 {
+        buffered := make([]byte, buf.Reader.Buffered())
+        buf.Read(buffered)
+        backend.Write(buffered)
+    }
+
+    go func() { defer backend.Close(); defer conn.Close(); io.Copy(backend, conn) }()
+    go func() { defer backend.Close(); defer conn.Close(); io.Copy(conn, backend) }()
+}
+
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
@@ -322,8 +356,8 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
     // forged-handshake proxy — same trick already used for the frps leg.
     switch r.URL.Path {
     case "/", "/_frws", "/_frpc", "/~!frp", "/~frp":
-        proxyWebSocket(w, r, frpPort)
-        return
+    pipeToFrps(w, r, frpPort)
+    return
     }
 
     // 2. Route Admin API
