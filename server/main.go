@@ -298,11 +298,13 @@ func pipeToFrps(w http.ResponseWriter, r *http.Request, targetPort int) {
         return
     }
 
-    // Reconstruct the original raw HTTP request and forward it verbatim
-    // including whatever frpc already sent — don't inject new headers
+    // Go's http.Server strips hop-by-hop headers (Connection, Upgrade) before
+    // the handler sees them. Restore them so frps recognizes the WS upgrade.
+    r.Header.Set("Connection", "Upgrade")
+    r.Header.Set("Upgrade", "websocket")
+
     r.Write(backend)
 
-    // Drain any already-buffered bytes from the hijacked conn
     if buf.Reader.Buffered() > 0 {
         buffered := make([]byte, buf.Reader.Buffered())
         buf.Read(buffered)
@@ -356,7 +358,7 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
     // forged-handshake proxy — same trick already used for the frps leg.
     switch r.URL.Path {
     case "/", "/_frws", "/_frpc", "/~!frp", "/~frp":
-    pipeToFrps(w, r, frpPort)
+    pipeToFrps(w, r, vhostPort)
     return
     }
 
