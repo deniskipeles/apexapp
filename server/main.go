@@ -217,24 +217,24 @@ func startWebhookServer(port int, isPaas bool) {
 }
 
 // proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
+// proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
-	// Try localhost first, then fall back to 127.0.0.1 to handle IPv6/IPv4 loopback variations
-	target := fmt.Sprintf("localhost:%d", targetPort)
+	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
 	backend, err := net.Dial("tcp", target)
 	if err != nil {
-		// Fallback to 127.0.0.1
-		target = fmt.Sprintf("127.0.0.1:%d", targetPort)
-		backend, err = net.Dial("tcp", target)
-	}
-
-	if err != nil {
-		// LOG THE EXACT ERROR TO RENDER LOGS
-		log.Printf("❌ proxyWebSocket error: Failed to connect to frps on port %d. Error: %v", targetPort, err)
-		
-		// Return the error details to the Python debug tool
-		http.Error(w, fmt.Sprintf("backend offline: %v", err), http.StatusBadGateway)
+		log.Printf("❌ proxyWebSocket: Failed to dial port %d", targetPort)
+		http.Error(w, "backend offline", http.StatusBadGateway)
 		return
 	}
+
+	// 🚨 THE CRITICAL FIX 🚨
+	// Render and Cloudflare strip these hop-by-hop headers.
+	// We MUST restore them here, or FRP's strict parser will hang up immediately.
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	
+	// Clear RequestURI so Go synthesizes a perfectly clean, relative path (e.g., GET /~!frp HTTP/1.1)
+	r.RequestURI = ""
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -249,8 +249,14 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 		return
 	}
 
-	r.Write(backend)
+	// Write the cleanly forged request directly to frps
+	if err := r.Write(backend); err != nil {
+		backend.Close()
+		conn.Close()
+		return
+	}
 
+	// Stream the bytes bidirectionally
 	go func() {
 		defer backend.Close()
 		defer conn.Close()
