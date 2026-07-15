@@ -217,17 +217,39 @@ func startWebhookServer(port int, isPaas bool) {
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	// Helper function to create a reverse proxy with quiet error handling
-	createProxy := func(targetPort int) *httputil.ReverseProxy {
+	createProxy := func(targetPort int, isWebSocket bool) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
 			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Silence harmless context canceled warnings
+		// Explicitly preserve and force WebSocket Upgrade headers for strict PaaS (like Render)
+		if isWebSocket {
+			originalDirector := proxy.Director
+			proxy.Director = func(req *http.Request) {
+				originalDirector(req)
+				if strings.ToLower(req.Header.Get("Upgrade")) == "websocket" {
+					req.Header.Set("Connection", "Upgrade")
+					req.Header.Set("Upgrade", "websocket")
+				}
+			}
+		}
+
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			if err == context.Canceled {
-				return // Ignore client connection cancellations
+			if err == context.Canceled || err == io.EOF {
+				return
+			}
+			errStr := err.Error()
+			if strings.Contains(errStr, "use of closed network connection") ||
+				strings.Contains(errStr, "connection reset by peer") ||
+				strings.Contains(errStr, "broken pipe") {
+				return
+			}
+			if strings.Contains(errStr, "connect: connection refused") {
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, "Tunnel engine is warming up, please refresh...", http.StatusServiceUnavailable)
+				return
 			}
 			log.Printf("http: proxy error: %v", err)
 		}
@@ -235,13 +257,13 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
-	frpVhostProxy := createProxy(vhostPort)
-	adminApiProxy := createProxy(pluginPort)
+	frpWsProxy := createProxy(frpPort, true) // WebSocket proxy
+	frpVhostProxy := createProxy(vhostPort, false)
+	adminApiProxy := createProxy(pluginPort, false)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Route FRPC WebSocket connections
-		if r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" || r.URL.Path == "/_frpc" {
+		// 1. Route ALL FRPC WebSocket control paths (including the default /_frws)
+		if r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" {
 			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
@@ -252,8 +274,6 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 
 		// 3. Route to FRP VHost
-		// Ensure the correct external Host is passed to FRPS
-		// Check for PaaS load balancer headers first
 		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
 			r.Host = forwardedHost
 		}
