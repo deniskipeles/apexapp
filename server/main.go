@@ -61,6 +61,18 @@ func main() {
 		port = "8000" // Default for PaaS
 	}
 
+	// PREVENT PORT COLLISIONS: If system PORT matches the default internal vhostPort, shift vhostPort dynamically
+	var systemPort int
+	fmt.Sscanf(port, "%d", &systemPort)
+	if systemPort == *vhostPort {
+		*vhostPort = systemPort + 1
+		// Ensure we don't accidentally collide with the control port (7000) or plugin port (9000)
+		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
+			*vhostPort = systemPort + 2
+		}
+		log.Printf("⚠️  System PORT and internal vhost-port collided on %d. Shifted internal vhost-port to %d", systemPort, *vhostPort)
+	}
+
 	adminKey = os.Getenv("ADMIN_KEY")
 	if adminKey == "" {
 		adminKey = generateRandomToken(16)
@@ -204,9 +216,28 @@ func startWebhookServer(port int, isPaas bool) {
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	frpWsProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", frpPort)})
-	frpVhostProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", vhostPort)})
-	adminApiProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", pluginPort)})
+	// Helper function to create a reverse proxy with quiet error handling
+	createProxy := func(targetPort int) *httputil.ReverseProxy {
+		targetURL := &url.URL{
+			Scheme: "http",
+			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
+		}
+		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+		// Silence harmless context canceled warnings
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			if err == context.Canceled {
+				return // Ignore client connection cancellations
+			}
+			log.Printf("http: proxy error: %v", err)
+		}
+
+		return proxy
+	}
+
+	frpWsProxy := createProxy(frpPort)
+	frpVhostProxy := createProxy(vhostPort)
+	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// 1. Route FRPC WebSocket connections
@@ -219,14 +250,14 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
-		
+
 		// 3. Route to FRP VHost
-		// CRITICAL FIX: Ensure the correct external Host is passed to FRPS
+		// Ensure the correct external Host is passed to FRPS
 		// Check for PaaS load balancer headers first
 		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
 			r.Host = forwardedHost
 		}
-		
+
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
