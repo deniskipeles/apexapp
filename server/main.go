@@ -280,6 +280,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
+	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -297,22 +298,33 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 				strings.Contains(errStr, "broken pipe") {
 				return
 			}
-			log.Printf("http: proxy error: %v", err)
+			if strings.Contains(errStr, "connect: connection refused") {
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
+				return
+			}
+			log.Printf("http: proxy error on port %d: %v", targetPort, err)
 		}
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Detect WebSockets ignoring the missing "Connection" header
-		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
+		// Detect WebSocket intention even if Render stripped the "Connection" header
+		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// 1. Route FRP Control Connections to TCP Port (7000) using the Custom Hijacker
-		// This now properly catches the root path "/" used by the desktop app
+		if isWebSocket {
+			// 🚨 THE SILVER BULLET 🚨
+			// Restore the stripped header so Go's native ReverseProxy knows to trigger its WebSocket engine!
+			r.Header.Set("Connection", "Upgrade")
+		}
+
+		// 1. Route FRP Control Connections natively to TCP Port (7000)
 		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			proxyWebSocket(w, r, frpPort)
+			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
 
