@@ -308,39 +308,37 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
+	// frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Detect WebSocket intention even if Render stripped the "Connection" header
-		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+    // 1. Route FRP Control Connections natively to TCP Port (7000).
+    // Render/Cloudflare strips the Upgrade/Connection headers before this
+    // handler ever sees them (confirmed: frps logs show these requests
+    // landing on the vhost proxy as plain HTTP, "no route found"), so we
+    // cannot rely on header detection here. These paths are only ever used
+    // by frpc, so route them unconditionally through the hijack-based
+    // forged-handshake proxy — same trick already used for the frps leg.
+    switch r.URL.Path {
+    case "/", "/_frws", "/_frpc", "/~!frp", "/~frp":
+        proxyWebSocket(w, r, frpPort)
+        return
+    }
 
-		if isWebSocket {
-			// 🚨 THE SILVER BULLET 🚨
-			// Restore the stripped header so Go's native ReverseProxy knows to trigger its WebSocket engine!
-			r.Header.Set("Connection", "Upgrade")
-		}
+    // 2. Route Admin API
+    if strings.HasPrefix(r.URL.Path, "/api/tokens") {
+        adminApiProxy.ServeHTTP(w, r)
+        return
+    }
 
-		// 1. Route FRP Control Connections natively to TCP Port (7000)
-		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			frpWsProxy.ServeHTTP(w, r)
-			return
-		}
+    // 3. Route normal HTTP Website Traffic to VHost (8081)
+    if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+        r.Host = forwardedHost
+    }
 
-		// 2. Route Admin API
-		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
-			adminApiProxy.ServeHTTP(w, r)
-			return
-		}
-
-		// 3. Route normal HTTP Website Traffic to VHost (8081)
-		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-			r.Host = forwardedHost
-		}
-
-		frpVhostProxy.ServeHTTP(w, r)
-	})
+    frpVhostProxy.ServeHTTP(w, r)
+})
 }
 
 func initDB() {
