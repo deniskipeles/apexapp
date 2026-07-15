@@ -270,7 +270,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Helper function for normal HTTP traffic
+	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -298,16 +298,17 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// 1. Route FRP Control Connections to the TCP Port (7000) using the Raw TCP Hijacker
-		// (Bypasses both Go's proxy header filtering AND frps's Host domain checks!)
+		// 1. Route FRP Control Connections natively to TCP Port (7000)
+		// This now properly catches the root path "/" used by the desktop app
 		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			proxyWebSocket(w, r, frpPort) // <--- ROUTE BACK TO frpPort (7000)!
+			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
 
