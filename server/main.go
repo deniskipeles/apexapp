@@ -218,10 +218,21 @@ func startWebhookServer(port int, isPaas bool) {
 
 // proxyWebSocket bypasses Go's HTTP proxy and pipes raw TCP bytes directly to frps
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
-	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	// Try localhost first, then fall back to 127.0.0.1 to handle IPv6/IPv4 loopback variations
+	target := fmt.Sprintf("localhost:%d", targetPort)
 	backend, err := net.Dial("tcp", target)
 	if err != nil {
-		http.Error(w, "backend offline", http.StatusBadGateway)
+		// Fallback to 127.0.0.1
+		target = fmt.Sprintf("127.0.0.1:%d", targetPort)
+		backend, err = net.Dial("tcp", target)
+	}
+
+	if err != nil {
+		// LOG THE EXACT ERROR TO RENDER LOGS
+		log.Printf("❌ proxyWebSocket error: Failed to connect to frps on port %d. Error: %v", targetPort, err)
+		
+		// Return the error details to the Python debug tool
+		http.Error(w, fmt.Sprintf("backend offline: %v", err), http.StatusBadGateway)
 		return
 	}
 
@@ -238,10 +249,8 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, targetPort int) {
 		return
 	}
 
-	// Forward the exact, unmodified HTTP WebSocket handshake to frps
 	r.Write(backend)
 
-	// Stream the raw bytes bidirectionally
 	go func() {
 		defer backend.Close()
 		defer conn.Close()
