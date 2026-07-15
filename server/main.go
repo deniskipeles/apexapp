@@ -42,6 +42,8 @@ type FrpResponse struct {
 }
 
 func main() {
+	// Load environment variables from .env file first
+	loadEnv()
 	// Flags
 	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS (Agency Mode)")
 	paasMode := flag.Bool("paas", false, "Enable PaaS mode (Disables Auto-TLS, listens on single PORT)")
@@ -327,4 +329,36 @@ func generateRandomToken(length int) string {
 	b := make([]byte, length/2)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// loadEnv reads a local .env file and sets environment variables for the process
+func loadEnv() {
+	bytes, err := os.ReadFile(".env")
+	if err != nil {
+		// No .env file found; proceed with system environment variables
+		return
+	}
+
+	lines := strings.Split(string(bytes), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		// Skip empty lines or comments
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+
+		// Trim surrounding quotes if they exist
+		val = strings.Trim(val, `"'`)
+
+		os.Setenv(key, val)
+	}
 }
