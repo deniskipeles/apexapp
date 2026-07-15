@@ -298,10 +298,10 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// 1. Route FRP Control Connections using the Raw TCP Hijacker
-		// (This catches default '/' path and all known FRP websocket paths)
-		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			proxyWebSocket(w, r, frpPort)
+		// 1. Route FRP Control Connections to the HTTP VHost Port (8081)
+		// (FRP expects WebSocket control handshakes on its HTTP engine, NOT its raw TCP engine!)
+		if isWebSocket && (r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
+			proxyWebSocket(w, r, vhostPort) // <--- CHANGED FROM frpPort TO vhostPort!
 			return
 		}
 
