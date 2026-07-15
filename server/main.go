@@ -298,10 +298,10 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// 1. Route FRP Control Connections to the HTTP VHost Port (8081)
-		// (FRP expects WebSocket control handshakes on its HTTP engine, NOT its raw TCP engine!)
-		if isWebSocket && (r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			proxyWebSocket(w, r, vhostPort) // <--- CHANGED FROM frpPort TO vhostPort!
+		// 1. Route FRP Control Connections to the TCP Port (7000) using the Raw TCP Hijacker
+		// (Bypasses both Go's proxy header filtering AND frps's Host domain checks!)
+		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
+			proxyWebSocket(w, r, frpPort) // <--- ROUTE BACK TO frpPort (7000)!
 			return
 		}
 
@@ -311,7 +311,7 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			return
 		}
 
-		// 3. Route normal HTTP Website Traffic to VHost
+		// 3. Route normal HTTP Website Traffic to VHost (8081)
 		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
 			r.Host = forwardedHost
 		}
