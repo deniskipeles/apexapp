@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -163,8 +164,64 @@ func main() {
 	}
 }
 
+// proxyWebSocketRaw is a bulletproof WebSocket proxy that manually hijacks the TCP connection.
+// It bypasses issues where PaaS load balancers strip headers or Go's ReverseProxy drops WS handshakes.
+func proxyWebSocketRaw(w http.ResponseWriter, r *http.Request, targetPort int) {
+	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	backend, err := net.Dial("tcp", target)
+	if err != nil {
+		http.Error(w, "Tunnel engine offline", http.StatusServiceUnavailable)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		// Fallback to standard ReverseProxy if Hijacker is not supported (e.g., HTTP/2 h2c is active)
+		targetURL := &url.URL{Scheme: "http", Host: target}
+		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+		
+		// Force headers to ensure Go's ReverseProxy triggers WebSocket mode
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		
+		proxy.ServeHTTP(w, r)
+		backend.Close()
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		backend.Close()
+		return
+	}
+
+	// Clean up RequestURI so r.Write creates a valid HTTP/1.1 request line
+	r.RequestURI = ""
+	r.URL.Scheme = "http"
+	r.URL.Host = target
+
+	// Explicitly force websocket headers back onto the request
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+
+	// Write the raw exact request directly to the backend FRP server
+	if err := r.Write(backend); err != nil {
+		clientConn.Close()
+		backend.Close()
+		return
+	}
+
+	// Bidirectional byte pipe
+	go func() {
+		io.Copy(backend, clientConn)
+		backend.Close()
+	}()
+	io.Copy(clientConn, backend)
+	clientConn.Close()
+}
+
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Native, robust Reverse Proxy generator
+	// Native HTTP proxy for VHost and Admin API
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -172,13 +229,11 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Fix for ReverseProxy modifying the host header, destroying VHost routing logic
+		// Ensure the Host header is passed intact to the backend (vhost mapping requires this)
 		director := proxy.Director
 		proxy.Director = func(req *http.Request) {
-			originalHost := req.Host // Save original host before director modifies it
+			originalHost := req.Host
 			director(req)
-			
-			// Ensure the Host header is passed intact to the backend (vhost matching needs it)
 			if fwd := req.Header.Get("X-Forwarded-Host"); fwd != "" {
 				req.Host = fwd
 			} else {
@@ -190,44 +245,34 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			if err == context.Canceled || err == io.EOF {
 				return
 			}
-			errStr := err.Error()
-			if strings.Contains(errStr, "use of closed network connection") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "broken pipe") {
-				return
-			}
-			if strings.Contains(errStr, "connect: connection refused") {
+			if strings.Contains(err.Error(), "connection refused") {
 				w.Header().Set("Retry-After", "2")
-				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
+				http.Error(w, "Service warming up...", http.StatusServiceUnavailable)
 				return
 			}
-			log.Printf("http: proxy error on port %d: %v", targetPort, err)
 		}
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Detect WebSocket intention robustly (Render may append ", h2c" or case varies)
 		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 
+		// 1. Route FRP Control Connections natively to TCP Port (7000) using Raw Hijacker
 		if isWebSocket {
-			// 🚨 THE SILVER BULLET 🚨
-			// Restore the stripped header so Go's native ReverseProxy knows to trigger its WebSocket engine!
-			r.Header.Set("Connection", "Upgrade")
-		}
-
-		// Detect if it's frpc based on User-Agent heuristics
-		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
-		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
-
-		// 1. Route FRP Control Connections natively to TCP Port (7000)
-		if isWebSocket && (isFrpClient || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
-			frpWsProxy.ServeHTTP(w, r)
-			return
+			// By default, FRP with protocol="wss" uses the path /~frp
+			isFRPPath := r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp"
+			
+			// Fallback check: Some very old clients might request '/'
+			userAgent := strings.ToLower(r.Header.Get("User-Agent"))
+			isFRPClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+			
+			if isFRPPath || (r.URL.Path == "/" && isFRPClient) {
+				proxyWebSocketRaw(w, r, frpPort)
+				return
+			}
 		}
 
 		// 2. Route Admin API
