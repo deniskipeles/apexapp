@@ -1,3 +1,4 @@
+// =========================== apexapp/server/main.go start here ===========================
 package main
 
 import (
@@ -171,6 +172,20 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
+		// Fix for ReverseProxy modifying the host header, destroying VHost routing logic
+		director := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalHost := req.Host // Save original host before director modifies it
+			director(req)
+			
+			// Ensure the Host header is passed intact to the backend (vhost matching needs it)
+			if fwd := req.Header.Get("X-Forwarded-Host"); fwd != "" {
+				req.Host = fwd
+			} else {
+				req.Host = originalHost
+			}
+		}
+
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			if err == context.Canceled || err == io.EOF {
 				return
@@ -196,8 +211,8 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Detect WebSocket intention even if Render stripped the "Connection" header
-		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+		// Detect WebSocket intention robustly (Render may append ", h2c" or case varies)
+		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 
 		if isWebSocket {
 			// 🚨 THE SILVER BULLET 🚨
@@ -205,8 +220,12 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			r.Header.Set("Connection", "Upgrade")
 		}
 
+		// Detect if it's frpc based on User-Agent heuristics
+		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
+		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+
 		// 1. Route FRP Control Connections natively to TCP Port (7000)
-		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
+		if isWebSocket && (isFrpClient || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
 			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
@@ -218,10 +237,6 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 
 		// 3. Route normal HTTP Website Traffic to VHost
-		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
-			r.Host = forwardedHost
-		}
-
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
@@ -408,3 +423,4 @@ func generateRandomToken(length int) string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
+// =========================== apexapp/server/main.go ends here ===========================
