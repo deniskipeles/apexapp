@@ -1,4 +1,3 @@
-// =========================== apexapp/server/main.go start here ===========================
 package main
 
 import (
@@ -14,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -24,7 +22,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/acme/autocert"
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // Pure Go SQLite
 )
 
 const frpVersion = "0.54.0"
@@ -43,55 +41,70 @@ type FrpResponse struct {
 	Unchange     bool   `json:"unchange"`
 }
 
+// loadEnv reads a local .env file and sets environment variables for the process
 func loadEnv() {
 	bytes, err := os.ReadFile(".env")
 	if err != nil {
-		return
+		return // No .env file found; proceed with system environment variables
 	}
+
 	lines := strings.Split(string(bytes), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
+
 		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			os.Setenv(strings.TrimSpace(parts[0]), strings.Trim(strings.TrimSpace(parts[1]), `"'`))
+		if len(parts) != 2 {
+			continue
 		}
+
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, `"'`) // Remove surrounding quotes
+
+		os.Setenv(key, val)
 	}
 }
 
 func main() {
+	// 1. Load environment variables from .env file first
 	loadEnv()
 
-	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS")
-	paasMode := flag.Bool("paas", false, "Enable PaaS mode")
+	// Flags
+	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS (Agency Mode)")
+	paasMode := flag.Bool("paas", false, "Enable PaaS mode (Disables Auto-TLS, listens on single PORT)")
 	frpPort := flag.Int("frp-port", 7000, "Internal Port for FRPC WebSocket")
 	vhostPort := flag.Int("vhost-port", 8080, "Internal Port for FRPS HTTP Proxy")
 	pluginPort := flag.Int("plugin-port", 9000, "Internal Port for FRP webhook")
 	flag.Parse()
 
+	// Environment Overrides
 	if os.Getenv("PAAS_MODE") == "true" {
 		*paasMode = true
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8000"
+		port = "8000" // Default for PaaS
 	}
 
+	// 2. PREVENT PORT COLLISIONS
 	var systemPort int
 	fmt.Sscanf(port, "%d", &systemPort)
 	if systemPort == *vhostPort {
 		*vhostPort = systemPort + 1
+		// Ensure we don't accidentally collide with the control port (7000) or plugin port (9000)
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
-		log.Printf("⚠️  System PORT collided. Shifted vhost-port to %d", *vhostPort)
+		log.Printf("⚠️  System PORT and internal vhost-port collided on %d. Shifted internal vhost-port to %d", systemPort, *vhostPort)
 	}
 
 	adminKey = os.Getenv("ADMIN_KEY")
 	if adminKey == "" {
 		adminKey = generateRandomToken(16)
+		log.Printf("⚠️  No ADMIN_KEY set. Generated temporary key: %s", adminKey)
 	}
 
 	initDB()
@@ -105,8 +118,11 @@ func main() {
 	}
 
 	go startFRPS()
+
+	// PASS PAAS_MODE TO WEBHOOK SERVER
 	go startWebhookServer(*pluginPort, *paasMode)
 
+	// Setup Multiplexer (Routes Traffic to Webhook, FRPC WebSocket, or VHost)
 	mux := http.NewServeMux()
 	setupMultiplexer(mux, *frpPort, *vhostPort, *pluginPort)
 
@@ -117,6 +133,7 @@ func main() {
 		}
 	} else {
 		log.Printf("🔒 Running in Agency Mode (Auto-TLS) for *.%s", *domain)
+
 		certManager := autocert.Manager{
 			Prompt: autocert.AcceptTOS,
 			HostPolicy: func(ctx context.Context, host string) error {
@@ -127,128 +144,91 @@ func main() {
 			},
 			Cache: autocert.DirCache("certs"),
 		}
+
 		server := &http.Server{
 			Addr:      ":443",
 			Handler:   mux,
 			TLSConfig: &tls.Config{GetCertificate: certManager.GetCertificate},
 		}
-		go http.ListenAndServe(":80", certManager.HTTPHandler(nil))
+
+		go func() {
+			log.Println("🌐 Listening on HTTP (:80) for ACME challenges and redirects...")
+			http.ListenAndServe(":80", certManager.HTTPHandler(nil))
+		}()
+
 		if err := server.ListenAndServeTLS("", ""); err != nil {
 			log.Fatalf("HTTPS server failed: %v", err)
 		}
 	}
 }
 
-// robustWebSocketProxy manually proxies the WebSocket upgrade request.
-// It bypasses Go's httputil.ReverseProxy which aggressively strips "Connection: Upgrade"
-func robustWebSocketProxy(w http.ResponseWriter, r *http.Request, targetPort int) {
-	backend, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
-	if err != nil {
-		http.Error(w, "Tunnel backend offline", http.StatusServiceUnavailable)
-		return
-	}
-
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		// If Hijack isn't supported (e.g., HTTP/2), gracefully fail back to reverse proxy
-		backend.Close()
-		http.Error(w, "Hijack not supported", http.StatusHTTPVersionNotSupported)
-		return
-	}
-	clientConn, _, err := hj.Hijack()
-	if err != nil {
-		backend.Close()
-		return
-	}
-
-	// 1. Manually build the outbound request to guarantee headers are not stripped
-	reqURI := r.URL.RequestURI()
-	if reqURI == "" {
-		reqURI = "/"
-	}
-	fmt.Fprintf(backend, "%s %s HTTP/1.1\r\n", r.Method, reqURI)
-	fmt.Fprintf(backend, "Host: %s\r\n", r.Host)
-	fmt.Fprintf(backend, "Connection: Upgrade\r\n")
-	fmt.Fprintf(backend, "Upgrade: websocket\r\n")
-
-	// Pass original headers
-	for k, vv := range r.Header {
-		lowerK := strings.ToLower(k)
-		if lowerK == "connection" || lowerK == "upgrade" || lowerK == "host" {
-			continue
-		}
-		for _, v := range vv {
-			fmt.Fprintf(backend, "%s: %s\r\n", k, v)
-		}
-	}
-	fmt.Fprintf(backend, "\r\n")
-
-	// 2. Safely proxy streams in both directions without premature closure
-	errc := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(backend, clientConn)
-		errc <- err
-	}()
-	go func() {
-		_, err := io.Copy(clientConn, backend)
-		errc <- err
-	}()
-
-	<-errc
-	clientConn.Close()
-	backend.Close()
-}
-
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
+	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
 			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
-		director := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			originalHost := req.Host
-			director(req)
-			if fwd := req.Header.Get("X-Forwarded-Host"); fwd != "" {
-				req.Host = fwd
-			} else {
-				req.Host = originalHost
+
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			if err == context.Canceled || err == io.EOF {
+				return
 			}
+			errStr := err.Error()
+			if strings.Contains(errStr, "use of closed network connection") ||
+				strings.Contains(errStr, "connection reset by peer") ||
+				strings.Contains(errStr, "broken pipe") {
+				return
+			}
+			if strings.Contains(errStr, "connect: connection refused") {
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
+				return
+			}
+			log.Printf("http: proxy error on port %d: %v", targetPort, err)
 		}
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
-		isFRPPath := path == "/~!frp" || path == "/~frp" || path == "/_frws" || path == "/_frpc" || path == "/_frpws"
-		
-		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
-		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+		// Detect WebSocket intention even if Render stripped the "Connection" header
+		isWebSocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 
-		// Route FRP Control Connections safely
-		if isFRPPath || (isWebSocket && isFrpClient) {
-			robustWebSocketProxy(w, r, frpPort)
+		if isWebSocket {
+			// 🚨 THE SILVER BULLET 🚨
+			// Restore the stripped header so Go's native ReverseProxy knows to trigger its WebSocket engine!
+			r.Header.Set("Connection", "Upgrade")
+		}
+
+		// 1. Route FRP Control Connections natively to TCP Port (7000)
+		if isWebSocket && (r.URL.Path == "/" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp") {
+			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// Route Admin API Connections
-		if strings.HasPrefix(path, "/api/tokens") {
+		// 2. Route Admin API
+		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// Route App Traffic
+		// 3. Route normal HTTP Website Traffic to VHost
+		if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+			r.Host = forwardedHost
+		}
+
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
 
 func startWebhookServer(port int, isPaas bool) {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/frp-hook", func(w http.ResponseWriter, r *http.Request) {
 		var req FrpRequest
 		json.NewDecoder(r.Body).Decode(&req)
@@ -256,6 +236,7 @@ func startWebhookServer(port int, isPaas bool) {
 
 		if req.Op == "NewProxy" {
 			requestedDomain := ""
+
 			if sub, ok := req.Content["subdomain"].(string); ok && sub != "" {
 				requestedDomain = sub
 			} else if customDoms, ok := req.Content["custom_domains"].([]interface{}); ok && len(customDoms) > 0 {
@@ -267,17 +248,30 @@ func startWebhookServer(port int, isPaas bool) {
 				token, _ = userObj["user"].(string)
 			}
 
+			// PAAS MODE: Bypass SQLite, use ADMIN_KEY permanently
 			if isPaas {
 				if token == adminKey {
 					resp.Reject = false
 					resp.Unchange = true
+					log.Printf("✅ Authorized PaaS tunnel: %s", requestedDomain)
+				} else {
+					resp.RejectReason = "Invalid Token (Expected ADMIN_KEY)"
 				}
 			} else {
+				// AGENCY MODE: Use SQLite Token Registry
 				var dbDomain string
 				err := db.QueryRow("SELECT domain FROM tunnel_tokens WHERE token = ?", token).Scan(&dbDomain)
-				if err == nil && dbDomain == requestedDomain {
+
+				if err == sql.ErrNoRows {
+					resp.RejectReason = "Invalid or missing token"
+				} else if err != nil {
+					resp.RejectReason = "Internal Server Error"
+				} else if dbDomain != requestedDomain {
+					resp.RejectReason = fmt.Sprintf("Token not authorized for domain '%s'", requestedDomain)
+				} else {
 					resp.Reject = false
 					resp.Unchange = true
+					log.Printf("✅ Authorized Agency tunnel: %s", requestedDomain)
 				}
 			}
 		}
@@ -293,6 +287,7 @@ func startWebhookServer(port int, isPaas bool) {
 		var payload struct{ Domain string `json:"domain"` }
 		json.NewDecoder(r.Body).Decode(&payload)
 
+		// If PaaS Mode, just return the ADMIN_KEY so it doesn't try to write to SQLite
 		if isPaas {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"token": adminKey, "domain": payload.Domain})
@@ -300,29 +295,80 @@ func startWebhookServer(port int, isPaas bool) {
 		}
 
 		token := generateRandomToken(24)
-		db.Exec("INSERT INTO tunnel_tokens (token, domain) VALUES (?, ?)", token, payload.Domain)
+		_, err := db.Exec("INSERT INTO tunnel_tokens (token, domain) VALUES (?, ?)", token, payload.Domain)
+		if err != nil {
+			http.Error(w, "Domain already claimed", http.StatusConflict)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"token": token, "domain": payload.Domain})
 	})
+
 	http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }
 
 func initDB() {
-	db, _ = sql.Open("sqlite", "tunnels.db")
-	db.Exec(`CREATE TABLE IF NOT EXISTS tunnel_tokens (token TEXT PRIMARY KEY, domain TEXT UNIQUE NOT NULL);`)
+	var err error
+	db, err = sql.Open("sqlite", "tunnels.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	db.Exec(`CREATE TABLE IF NOT EXISTS tunnel_tokens (token TEXT PRIMARY KEY, domain TEXT UNIQUE NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`)
 }
 
 func generateFRPSConfig(domain string, bindPort, vhostPort, pluginPort int) error {
+	custom404HTML := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tunnel Offline | ApexKit</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); text-align: center; max-width: 450px; width: 90%; }
+        .icon-wrapper { display: inline-flex; align-items: center; justify-content: center; width: 120px; height: 120px; background-color: #fef2f2; border-radius: 50%; margin-bottom: 24px; }
+        h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 12px 0; color: #0f172a; }
+        p { color: #64748b; margin: 0 0 20px 0; line-height: 1.6; font-size: 0.95rem; }
+        .footer { font-size: 0.85rem; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 16px; margin-top: 10px; }
+        a { color: #3b82f6; text-decoration: none; font-weight: 500; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon-wrapper">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3"></path>
+                <line x1="1" y1="1" x2="23" y2="23"></line>
+            </svg>
+        </div>
+        <h1>Tunnel is Offline</h1>
+        <p>The ApexApp tunnel you are trying to reach is currently disconnected or unavailable.</p>
+        <p>If you are the owner, please open your ApexApp dashboard and click <b>Start Managed Tunnel</b> to bring it back online.</p>
+        <div class="footer">
+            Powered by <a href="https://github.com/deniskipeles/apexkit" target="_blank">ApexKit</a> and <a href="https://github.com/deniskipeles/apexapp" target="_blank">ApexApp</a>
+        </div>
+    </div>
+</body>
+</html>`
+
+	if err := os.WriteFile("404.html", []byte(custom404HTML), 0644); err != nil {
+		return err
+	}
+
 	config := fmt.Sprintf(`
 bindPort = %d
 vhostHTTPPort = %d
 subDomainHost = "%s"
+custom404Page = "./404.html"
+
 [[httpPlugins]]
 name = "apex_auth"
 addr = "127.0.0.1:%d"
 path = "/frp-hook"
 ops = ["NewProxy"]
 `, bindPort, vhostPort, domain, pluginPort)
+
 	return os.WriteFile("frps.toml", []byte(config), 0644)
 }
 
@@ -362,4 +408,3 @@ func generateRandomToken(length int) string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
-// =========================== apexapp/server/main.go ends here ===========================
