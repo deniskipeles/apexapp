@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -43,11 +42,10 @@ type FrpResponse struct {
 	Unchange     bool   `json:"unchange"`
 }
 
-// loadEnv reads a local .env file and sets environment variables for the process
 func loadEnv() {
 	bytes, err := os.ReadFile(".env")
 	if err != nil {
-		return // No .env file found; proceed with system environment variables
+		return
 	}
 
 	lines := strings.Split(string(bytes), "\n")
@@ -64,39 +62,34 @@ func loadEnv() {
 
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"'`) // Remove surrounding quotes
+		val = strings.Trim(val, `"'`)
 
 		os.Setenv(key, val)
 	}
 }
 
 func main() {
-	// 1. Load environment variables from .env file first
 	loadEnv()
 
-	// Flags
-	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS (Agency Mode)")
-	paasMode := flag.Bool("paas", false, "Enable PaaS mode (Disables Auto-TLS, listens on single PORT)")
+	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS")
+	paasMode := flag.Bool("paas", false, "Enable PaaS mode")
 	frpPort := flag.Int("frp-port", 7000, "Internal Port for FRPC WebSocket")
 	vhostPort := flag.Int("vhost-port", 8080, "Internal Port for FRPS HTTP Proxy")
 	pluginPort := flag.Int("plugin-port", 9000, "Internal Port for FRP webhook")
 	flag.Parse()
 
-	// Environment Overrides
 	if os.Getenv("PAAS_MODE") == "true" {
 		*paasMode = true
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8000" // Default for PaaS
+		port = "8000"
 	}
 
-	// 2. PREVENT PORT COLLISIONS
 	var systemPort int
 	fmt.Sscanf(port, "%d", &systemPort)
 	if systemPort == *vhostPort {
 		*vhostPort = systemPort + 1
-		// Ensure we don't accidentally collide with the control port (7000) or plugin port (9000)
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
@@ -120,11 +113,8 @@ func main() {
 	}
 
 	go startFRPS()
-
-	// PASS PAAS_MODE TO WEBHOOK SERVER
 	go startWebhookServer(*pluginPort, *paasMode)
 
-	// Setup Multiplexer (Routes Traffic to Webhook, FRPC WebSocket, or VHost)
 	mux := http.NewServeMux()
 	setupMultiplexer(mux, *frpPort, *vhostPort, *pluginPort)
 
@@ -164,64 +154,7 @@ func main() {
 	}
 }
 
-// proxyWebSocketRaw is a bulletproof WebSocket proxy that manually hijacks the TCP connection.
-// It bypasses issues where PaaS load balancers strip headers or Go's ReverseProxy drops WS handshakes.
-func proxyWebSocketRaw(w http.ResponseWriter, r *http.Request, targetPort int) {
-	target := fmt.Sprintf("127.0.0.1:%d", targetPort)
-	backend, err := net.Dial("tcp", target)
-	if err != nil {
-		http.Error(w, "Tunnel engine offline", http.StatusServiceUnavailable)
-		return
-	}
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		// Fallback to standard ReverseProxy if Hijacker is not supported (e.g., HTTP/2 h2c is active)
-		targetURL := &url.URL{Scheme: "http", Host: target}
-		proxy := httputil.NewSingleHostReverseProxy(targetURL)
-		
-		// Force headers to ensure Go's ReverseProxy triggers WebSocket mode
-		r.Header.Set("Connection", "Upgrade")
-		r.Header.Set("Upgrade", "websocket")
-		
-		proxy.ServeHTTP(w, r)
-		backend.Close()
-		return
-	}
-
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		backend.Close()
-		return
-	}
-
-	// Clean up RequestURI so r.Write creates a valid HTTP/1.1 request line
-	r.RequestURI = ""
-	r.URL.Scheme = "http"
-	r.URL.Host = target
-
-	// Explicitly force websocket headers back onto the request
-	r.Header.Set("Connection", "Upgrade")
-	r.Header.Set("Upgrade", "websocket")
-
-	// Write the raw exact request directly to the backend FRP server
-	if err := r.Write(backend); err != nil {
-		clientConn.Close()
-		backend.Close()
-		return
-	}
-
-	// Bidirectional byte pipe
-	go func() {
-		io.Copy(backend, clientConn)
-		backend.Close()
-	}()
-	io.Copy(clientConn, backend)
-	clientConn.Close()
-}
-
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Native HTTP proxy for VHost and Admin API
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -229,7 +162,7 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Ensure the Host header is passed intact to the backend (vhost mapping requires this)
+		// Preserve original Host header so VHost routing in FRPS works perfectly
 		director := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			originalHost := req.Host
@@ -250,38 +183,31 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 				http.Error(w, "Service warming up...", http.StatusServiceUnavailable)
 				return
 			}
+			log.Printf("Proxy error to port %d: %v", targetPort, err)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		}
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
-
-		// 1. Route FRP Control Connections natively to TCP Port (7000) using Raw Hijacker
-		if isWebSocket {
-			// By default, FRP with protocol="wss" uses the path /~frp
-			isFRPPath := r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/~!frp" || r.URL.Path == "/~frp"
-			
-			// Fallback check: Some very old clients might request '/'
-			userAgent := strings.ToLower(r.Header.Get("User-Agent"))
-			isFRPClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
-			
-			if isFRPPath || (r.URL.Path == "/" && isFRPClient) {
-				proxyWebSocketRaw(w, r, frpPort)
-				return
-			}
+		// 1. Route FRP Control Connections to TCP Bind Port (7000)
+		// FRPC uses `/~!frp` or `/~frp` exclusively when connecting via WSS protocol
+		if r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" || r.URL.Path == "/_frws" {
+			frpWsProxy.ServeHTTP(w, r)
+			return
 		}
 
-		// 2. Route Admin API
+		// 2. Route Admin API Connections (9000)
 		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 3. Route normal HTTP Website Traffic to VHost
+		// 3. Route Website/App Traffic (including user app WebSockets) to VHost (8080)
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
@@ -308,7 +234,6 @@ func startWebhookServer(port int, isPaas bool) {
 				token, _ = userObj["user"].(string)
 			}
 
-			// PAAS MODE: Bypass SQLite, use ADMIN_KEY permanently
 			if isPaas {
 				if token == adminKey {
 					resp.Reject = false
@@ -318,7 +243,6 @@ func startWebhookServer(port int, isPaas bool) {
 					resp.RejectReason = "Invalid Token (Expected ADMIN_KEY)"
 				}
 			} else {
-				// AGENCY MODE: Use SQLite Token Registry
 				var dbDomain string
 				err := db.QueryRow("SELECT domain FROM tunnel_tokens WHERE token = ?", token).Scan(&dbDomain)
 
@@ -347,7 +271,6 @@ func startWebhookServer(port int, isPaas bool) {
 		var payload struct{ Domain string `json:"domain"` }
 		json.NewDecoder(r.Body).Decode(&payload)
 
-		// If PaaS Mode, just return the ADMIN_KEY so it doesn't try to write to SQLite
 		if isPaas {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"token": adminKey, "domain": payload.Domain})
