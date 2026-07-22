@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -42,7 +43,6 @@ type FrpResponse struct {
 	Unchange     bool   `json:"unchange"`
 }
 
-// loadEnv reads a local .env file and sets environment variables for the process
 func loadEnv() {
 	bytes, err := os.ReadFile(".env")
 	if err != nil {
@@ -70,7 +70,6 @@ func loadEnv() {
 }
 
 func main() {
-	// 1. Load environment variables from .env file first
 	loadEnv()
 
 	// Flags
@@ -81,21 +80,19 @@ func main() {
 	pluginPort := flag.Int("plugin-port", 9000, "Internal Port for FRP webhook")
 	flag.Parse()
 
-	// Environment Overrides
 	if os.Getenv("PAAS_MODE") == "true" {
 		*paasMode = true
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8000" // Default for PaaS
+		port = "8000"
 	}
 
-	// 2. PREVENT PORT COLLISIONS
+	// PREVENT PORT COLLISIONS
 	var systemPort int
 	fmt.Sscanf(port, "%d", &systemPort)
 	if systemPort == *vhostPort {
 		*vhostPort = systemPort + 1
-		// Ensure we don't accidentally collide with the control port (7000) or plugin port (9000)
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
@@ -119,11 +116,9 @@ func main() {
 	}
 
 	go startFRPS()
-
-	// PASS PAAS_MODE TO WEBHOOK SERVER
 	go startWebhookServer(*pluginPort, *paasMode)
 
-	// Setup Multiplexer (Routes Traffic to Webhook, FRPC WebSocket, or VHost)
+	// Setup Multiplexer
 	mux := http.NewServeMux()
 	setupMultiplexer(mux, *frpPort, *vhostPort, *pluginPort)
 
@@ -163,8 +158,66 @@ func main() {
 	}
 }
 
+// proxyFRPControl handles the WebSocket upgrade manually by hijacking the TCP connection.
+// This guarantees that PaaS load balancer header stripping doesn't break the frpc connection.
+func proxyFRPControl(w http.ResponseWriter, r *http.Request, frpPort int) {
+	target := fmt.Sprintf("127.0.0.1:%d", frpPort)
+	backend, err := net.Dial("tcp", target)
+	if err != nil {
+		http.Error(w, "Tunnel backend offline", http.StatusServiceUnavailable)
+		return
+	}
+	defer backend.Close()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	defer clientConn.Close()
+
+	reqURI := r.RequestURI
+	if reqURI == "" {
+		reqURI = r.URL.RequestURI()
+	}
+
+	// 1. Manually construct the HTTP Request to ensure pristine WebSocket headers reach FRPS
+	backend.Write([]byte(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, reqURI)))
+	backend.Write([]byte(fmt.Sprintf("Host: %s\r\n", r.Host)))
+	backend.Write([]byte("Connection: Upgrade\r\n"))
+	backend.Write([]byte("Upgrade: websocket\r\n"))
+
+	// 2. Pass along the rest of the headers
+	for k, vv := range r.Header {
+		kLower := strings.ToLower(k)
+		if kLower == "connection" || kLower == "upgrade" || kLower == "host" {
+			continue // Prevent duplicates
+		}
+		for _, v := range vv {
+			backend.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, v)))
+		}
+	}
+	backend.Write([]byte("\r\n"))
+
+	// 3. Establish a bidirectional byte pipe
+	errc := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(backend, clientConn)
+		errc <- err
+	}()
+	go func() {
+		_, err := io.Copy(clientConn, backend)
+		errc <- err
+	}()
+	<-errc
+}
+
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
-	// Native, robust Reverse Proxy generator
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
 			Scheme: "http",
@@ -172,13 +225,11 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Fix for ReverseProxy modifying the host header, destroying VHost routing logic
+		// Preserve original Host header so VHost routing in FRPS works perfectly
 		director := proxy.Director
 		proxy.Director = func(req *http.Request) {
-			originalHost := req.Host // Save original host before director modifies it
+			originalHost := req.Host
 			director(req)
-			
-			// Ensure the Host header is passed intact to the backend (vhost matching needs it)
 			if fwd := req.Header.Get("X-Forwarded-Host"); fwd != "" {
 				req.Host = fwd
 			} else {
@@ -190,62 +241,44 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			if err == context.Canceled || err == io.EOF {
 				return
 			}
-			errStr := err.Error()
-			if strings.Contains(errStr, "use of closed network connection") ||
-				strings.Contains(errStr, "connection reset by peer") ||
-				strings.Contains(errStr, "broken pipe") {
-				return
-			}
-			if strings.Contains(errStr, "connect: connection refused") {
+			if strings.Contains(err.Error(), "connection refused") {
 				w.Header().Set("Retry-After", "2")
-				http.Error(w, "Tunnel engine warming up...", http.StatusServiceUnavailable)
+				http.Error(w, "Service warming up...", http.StatusServiceUnavailable)
 				return
 			}
-			log.Printf("http: proxy error on port %d: %v", targetPort, err)
+			log.Printf("Proxy error to port %d: %v", targetPort, err)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		}
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Detect WebSocket intention robustly
 		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 
 		if isWebSocket {
-			// 🚨 THE SILVER BULLET 🚨
-			// Render / Cloudflare often strip `Connection: Upgrade` on HTTP/2 edges.
-			// Go's ReverseProxy will silently DROP the websocket upgrade unless this header is present.
-			// We force it back in to guarantee 101 Switching Protocols works.
-			r.Header.Set("Connection", "Upgrade")
-			r.Header.Set("Upgrade", "websocket")
-
-			// Detect if it's frpc based on User-Agent heuristics
+			// Identify if the client is FRP or a normal web browser
 			userAgent := strings.ToLower(r.Header.Get("User-Agent"))
-			isFrpClient := strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
-			isBrowser := strings.Contains(userAgent, "mozilla") || strings.Contains(userAgent, "chrome") || strings.Contains(userAgent, "safari")
-
-			// Detect FRP Control Connection paths
+			isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+			
 			isFRPPath := r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/_frpws"
 			
-			// 1. Route FRP Control Connections natively to TCP Port (7000)
-			// Match known paths, OR match the root '/' IF it's clearly the frpc client (not a browser)
-			if isFRPPath || (r.URL.Path == "/" && (isFrpClient || !isBrowser)) {
-				frpWsProxy.ServeHTTP(w, r)
+			// 1. Route FRP Control Connections to TCP Bind Port (7000) using the TCP Hijacker
+			if isFRPPath || (r.URL.Path == "/" && isFrpClient) {
+				proxyFRPControl(w, r, frpPort)
 				return
 			}
 		}
 
-		// 2. Route Admin API
+		// 2. Route Admin API Connections (9000)
 		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 3. Route normal HTTP Website Traffic to VHost
+		// 3. Route Website/App Traffic (8080)
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
