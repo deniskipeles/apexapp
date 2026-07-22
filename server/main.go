@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -45,7 +46,7 @@ type FrpResponse struct {
 func loadEnv() {
 	bytes, err := os.ReadFile(".env")
 	if err != nil {
-		return // No .env file found; proceed with system environment variables
+		return
 	}
 
 	lines := strings.Split(string(bytes), "\n")
@@ -62,7 +63,7 @@ func loadEnv() {
 
 		key := strings.TrimSpace(parts[0])
 		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"'`) // Remove surrounding quotes
+		val = strings.Trim(val, `"'`)
 
 		os.Setenv(key, val)
 	}
@@ -71,7 +72,6 @@ func loadEnv() {
 func main() {
 	loadEnv()
 
-	// Flags
 	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS (Agency Mode)")
 	paasMode := flag.Bool("paas", false, "Enable PaaS mode (Disables Auto-TLS, listens on single PORT)")
 	frpPort := flag.Int("frp-port", 7000, "Internal Port for FRPC WebSocket")
@@ -87,7 +87,6 @@ func main() {
 		port = "8000"
 	}
 
-	// PREVENT PORT COLLISIONS
 	var systemPort int
 	fmt.Sscanf(port, "%d", &systemPort)
 	if systemPort == *vhostPort {
@@ -95,7 +94,7 @@ func main() {
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
-		log.Printf("⚠️  System PORT and internal vhost-port collided on %d. Shifted internal vhost-port to %d", systemPort, *vhostPort)
+		log.Printf("⚠️  System PORT collided on %d. Shifted vhost-port to %d", systemPort, *vhostPort)
 	}
 
 	adminKey = os.Getenv("ADMIN_KEY")
@@ -117,7 +116,6 @@ func main() {
 	go startFRPS()
 	go startWebhookServer(*pluginPort, *paasMode)
 
-	// Setup Multiplexer
 	mux := http.NewServeMux()
 	setupMultiplexer(mux, *frpPort, *vhostPort, *pluginPort)
 
@@ -147,7 +145,7 @@ func main() {
 		}
 
 		go func() {
-			log.Println("🌐 Listening on HTTP (:80) for ACME challenges and redirects...")
+			log.Println("🌐 Listening on HTTP (:80) for ACME challenges...")
 			http.ListenAndServe(":80", certManager.HTTPHandler(nil))
 		}()
 
@@ -155,6 +153,60 @@ func main() {
 			log.Fatalf("HTTPS server failed: %v", err)
 		}
 	}
+}
+
+// proxyRawTCP completely bypasses Go's ReverseProxy and establishes a raw byte tunnel
+// to the FRP server, forcibly injecting the missing WebSocket headers.
+func proxyRawTCP(w http.ResponseWriter, r *http.Request, targetPort int) bool {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return false // Cannot hijack (e.g. HTTP/2 edge), fallback to ReverseProxy
+	}
+
+	backend, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
+	if err != nil {
+		http.Error(w, "Tunnel backend offline", http.StatusBadGateway)
+		return true
+	}
+
+	clientConn, bufrw, err := hj.Hijack()
+	if err != nil {
+		backend.Close()
+		return true
+	}
+
+	// 1. Prepare request for native Go writing
+	r.URL.Scheme = "http"
+	r.URL.Host = fmt.Sprintf("127.0.0.1:%d", targetPort)
+	r.RequestURI = "" // Must be empty for r.Write to work correctly
+
+	// 2. 🚨 Forcibly restore headers stripped by PaaS Load Balancers 🚨
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+
+	// 3. Write perfectly formatted HTTP/1.1 request to backend
+	if err := r.Write(backend); err != nil {
+		clientConn.Close()
+		backend.Close()
+		return true
+	}
+
+	// 4. Create bidirectional raw byte tunnel
+	go func() {
+		defer backend.Close()
+		// Flush any bytes the Go server had already buffered during headers parsing
+		if bufrw.Reader.Buffered() > 0 {
+			io.CopyN(backend, bufrw.Reader, int64(bufrw.Reader.Buffered()))
+		}
+		io.Copy(backend, clientConn)
+	}()
+
+	go func() {
+		defer clientConn.Close()
+		io.Copy(clientConn, backend)
+	}()
+
+	return true
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
@@ -165,7 +217,6 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
-		// Preserve original Host header so VHost routing in FRPS works perfectly
 		director := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			originalHost := req.Host
@@ -181,13 +232,7 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			if err == context.Canceled || err == io.EOF {
 				return
 			}
-			if strings.Contains(err.Error(), "connection refused") {
-				w.Header().Set("Retry-After", "2")
-				http.Error(w, "Service warming up...", http.StatusServiceUnavailable)
-				return
-			}
-			log.Printf("Proxy error to port %d: %v", targetPort, err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			http.Error(w, "Tunnel warming up...", http.StatusServiceUnavailable)
 		}
 		return proxy
 	}
@@ -199,35 +244,34 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// 1. Identify FRP Control Traffic
-		// frpc natively requests these paths when using protocol = "wss"
+		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
+		
 		isFRPPath := path == "/~!frp" || path == "/~frp" || path == "/_frws" || path == "/_frpc" || path == "/_frpws"
 		
-		// Fallback heuristic: did the client ask for a WebSocket AND is it an automated client?
-		clientRequestedWS := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
 		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
 
-		if isFRPPath || (clientRequestedWS && isFrpClient) {
-			// 🚨 THE SILVER BULLET FOR PAAS WEBSOCKETS 🚨
-			// Render, Cloudflare, and Heroku strip hop-by-hop headers like `Connection: Upgrade`.
-			// Without these headers, Go's httputil.ReverseProxy silently treats it as a plain GET request,
-			// causing `frps` to return a `200 OK` or `404` instead of `101 Switching Protocols`.
-			// We MUST forcefully inject them back in to trigger Go's internal WebSocket proxy engine.
-			r.Header.Set("Connection", "upgrade")
-			r.Header.Set("Upgrade", "websocket")
+		// Route FRP WebSocket connections (BindPort: 7000)
+		if isFRPPath || (isWebSocket && isFrpClient) {
+			// Attempt pure TCP hijack first to bypass PaaS header stripping
+			if success := proxyRawTCP(w, r, frpPort); success {
+				return
+			}
 
+			// Fallback (only triggers if Hijack fails)
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Upgrade", "websocket")
 			frpWsProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 2. Route Admin API Connections
+		// Route Admin API Connections (PluginPort: 9000)
 		if strings.HasPrefix(path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 3. Route Website/App Traffic (including user app WebSockets)
+		// Route App Traffic (VHostPort: 8080)
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
@@ -254,7 +298,6 @@ func startWebhookServer(port int, isPaas bool) {
 				token, _ = userObj["user"].(string)
 			}
 
-			// PAAS MODE: Bypass SQLite, use ADMIN_KEY permanently
 			if isPaas {
 				if token == adminKey {
 					resp.Reject = false
@@ -264,7 +307,6 @@ func startWebhookServer(port int, isPaas bool) {
 					resp.RejectReason = "Invalid Token (Expected ADMIN_KEY)"
 				}
 			} else {
-				// AGENCY MODE: Use SQLite Token Registry
 				var dbDomain string
 				err := db.QueryRow("SELECT domain FROM tunnel_tokens WHERE token = ?", token).Scan(&dbDomain)
 
@@ -293,7 +335,6 @@ func startWebhookServer(port int, isPaas bool) {
 		var payload struct{ Domain string `json:"domain"` }
 		json.NewDecoder(r.Body).Decode(&payload)
 
-		// If PaaS Mode, just return the ADMIN_KEY so it doesn't try to write to SQLite
 		if isPaas {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"token": adminKey, "domain": payload.Domain})
