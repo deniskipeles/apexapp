@@ -26,6 +26,7 @@ dist-ssr
 xwin
 .xwin-cache
 *.local
+*.env
 
 # Editor directories and files
 .vscode/*
