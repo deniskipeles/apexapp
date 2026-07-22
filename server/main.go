@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -158,65 +157,6 @@ func main() {
 	}
 }
 
-// proxyFRPControl handles the WebSocket upgrade manually by hijacking the TCP connection.
-// This guarantees that PaaS load balancer header stripping doesn't break the frpc connection.
-func proxyFRPControl(w http.ResponseWriter, r *http.Request, frpPort int) {
-	target := fmt.Sprintf("127.0.0.1:%d", frpPort)
-	backend, err := net.Dial("tcp", target)
-	if err != nil {
-		http.Error(w, "Tunnel backend offline", http.StatusServiceUnavailable)
-		return
-	}
-	defer backend.Close()
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
-	defer clientConn.Close()
-
-	reqURI := r.RequestURI
-	if reqURI == "" {
-		reqURI = r.URL.RequestURI()
-	}
-
-	// 1. Manually construct the HTTP Request to ensure pristine WebSocket headers reach FRPS
-	backend.Write([]byte(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, reqURI)))
-	backend.Write([]byte(fmt.Sprintf("Host: %s\r\n", r.Host)))
-	backend.Write([]byte("Connection: Upgrade\r\n"))
-	backend.Write([]byte("Upgrade: websocket\r\n"))
-
-	// 2. Pass along the rest of the headers
-	for k, vv := range r.Header {
-		kLower := strings.ToLower(k)
-		if kLower == "connection" || kLower == "upgrade" || kLower == "host" {
-			continue // Prevent duplicates
-		}
-		for _, v := range vv {
-			backend.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, v)))
-		}
-	}
-	backend.Write([]byte("\r\n"))
-
-	// 3. Establish a bidirectional byte pipe
-	errc := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(backend, clientConn)
-		errc <- err
-	}()
-	go func() {
-		_, err := io.Copy(clientConn, backend)
-		errc <- err
-	}()
-	<-errc
-}
-
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 	createProxy := func(targetPort int) *httputil.ReverseProxy {
 		targetURL := &url.URL{
@@ -252,33 +192,42 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 		return proxy
 	}
 
+	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
+		path := r.URL.Path
 
-		if isWebSocket {
-			// Identify if the client is FRP or a normal web browser
-			userAgent := strings.ToLower(r.Header.Get("User-Agent"))
-			isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
-			
-			isFRPPath := r.URL.Path == "/~!frp" || r.URL.Path == "/~frp" || r.URL.Path == "/_frws" || r.URL.Path == "/_frpc" || r.URL.Path == "/_frpws"
-			
-			// 1. Route FRP Control Connections to TCP Bind Port (7000) using the TCP Hijacker
-			if isFRPPath || (r.URL.Path == "/" && isFrpClient) {
-				proxyFRPControl(w, r, frpPort)
-				return
-			}
+		// 1. Identify FRP Control Traffic
+		// frpc natively requests these paths when using protocol = "wss"
+		isFRPPath := path == "/~!frp" || path == "/~frp" || path == "/_frws" || path == "/_frpc" || path == "/_frpws"
+		
+		// Fallback heuristic: did the client ask for a WebSocket AND is it an automated client?
+		clientRequestedWS := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
+		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
+		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+
+		if isFRPPath || (clientRequestedWS && isFrpClient) {
+			// 🚨 THE SILVER BULLET FOR PAAS WEBSOCKETS 🚨
+			// Render, Cloudflare, and Heroku strip hop-by-hop headers like `Connection: Upgrade`.
+			// Without these headers, Go's httputil.ReverseProxy silently treats it as a plain GET request,
+			// causing `frps` to return a `200 OK` or `404` instead of `101 Switching Protocols`.
+			// We MUST forcefully inject them back in to trigger Go's internal WebSocket proxy engine.
+			r.Header.Set("Connection", "upgrade")
+			r.Header.Set("Upgrade", "websocket")
+
+			frpWsProxy.ServeHTTP(w, r)
+			return
 		}
 
-		// 2. Route Admin API Connections (9000)
-		if strings.HasPrefix(r.URL.Path, "/api/tokens") {
+		// 2. Route Admin API Connections
+		if strings.HasPrefix(path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// 3. Route Website/App Traffic (8080)
+		// 3. Route Website/App Traffic (including user app WebSockets)
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
