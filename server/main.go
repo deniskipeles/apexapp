@@ -72,8 +72,8 @@ func loadEnv() {
 func main() {
 	loadEnv()
 
-	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS (Agency Mode)")
-	paasMode := flag.Bool("paas", false, "Enable PaaS mode (Disables Auto-TLS, listens on single PORT)")
+	domain := flag.String("domain", "apexkit.io", "Base domain for Auto-TLS")
+	paasMode := flag.Bool("paas", false, "Enable PaaS mode")
 	frpPort := flag.Int("frp-port", 7000, "Internal Port for FRPC WebSocket")
 	vhostPort := flag.Int("vhost-port", 8080, "Internal Port for FRPS HTTP Proxy")
 	pluginPort := flag.Int("plugin-port", 9000, "Internal Port for FRP webhook")
@@ -94,7 +94,7 @@ func main() {
 		if *vhostPort == *frpPort || *vhostPort == *pluginPort {
 			*vhostPort = systemPort + 2
 		}
-		log.Printf("⚠️  System PORT collided on %d. Shifted vhost-port to %d", systemPort, *vhostPort)
+		log.Printf("⚠️  System PORT collided. Shifted vhost-port to %d", *vhostPort)
 	}
 
 	adminKey = os.Getenv("ADMIN_KEY")
@@ -155,58 +155,57 @@ func main() {
 	}
 }
 
-// proxyRawTCP completely bypasses Go's ReverseProxy and establishes a raw byte tunnel
-// to the FRP server, forcibly injecting the missing WebSocket headers.
-func proxyRawTCP(w http.ResponseWriter, r *http.Request, targetPort int) bool {
+// proxyFRPControl manually hijacks the connection and writes perfectly formatted HTTP/1.1
+// It bypasses Go's fragile ReverseProxy and Render's header stripping.
+func proxyFRPControl(w http.ResponseWriter, r *http.Request, targetPort int) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		return false // Cannot hijack (e.g. HTTP/2 edge), fallback to ReverseProxy
+		http.Error(w, "HTTP Hijacking not supported on this edge", http.StatusHTTPVersionNotSupported)
+		return
 	}
 
 	backend, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", targetPort))
 	if err != nil {
 		http.Error(w, "Tunnel backend offline", http.StatusBadGateway)
-		return true
+		return
 	}
+	defer backend.Close()
 
-	clientConn, bufrw, err := hj.Hijack()
+	clientConn, _, err := hj.Hijack()
 	if err != nil {
-		backend.Close()
-		return true
+		http.Error(w, "Failed to hijack connection", http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	reqURI := r.URL.RequestURI()
+	if reqURI == "" {
+		reqURI = "/"
 	}
 
-	// 1. Prepare request for native Go writing
-	r.URL.Scheme = "http"
-	r.URL.Host = fmt.Sprintf("127.0.0.1:%d", targetPort)
-	r.RequestURI = "" // Must be empty for r.Write to work correctly
+	// 1. Manually build the exact HTTP string. This prevents 502s caused by Go's r.Write()
+	fmt.Fprintf(backend, "%s %s HTTP/1.1\r\n", r.Method, reqURI)
+	fmt.Fprintf(backend, "Host: %s\r\n", r.Host)
+	
+	// 2. Forcefully inject the WebSocket Upgrade headers
+	fmt.Fprintf(backend, "Connection: Upgrade\r\n")
+	fmt.Fprintf(backend, "Upgrade: websocket\r\n")
 
-	// 2. 🚨 Forcibly restore headers stripped by PaaS Load Balancers 🚨
-	r.Header.Set("Connection", "Upgrade")
-	r.Header.Set("Upgrade", "websocket")
-
-	// 3. Write perfectly formatted HTTP/1.1 request to backend
-	if err := r.Write(backend); err != nil {
-		clientConn.Close()
-		backend.Close()
-		return true
-	}
-
-	// 4. Create bidirectional raw byte tunnel
-	go func() {
-		defer backend.Close()
-		// Flush any bytes the Go server had already buffered during headers parsing
-		if bufrw.Reader.Buffered() > 0 {
-			io.CopyN(backend, bufrw.Reader, int64(bufrw.Reader.Buffered()))
+	// 3. Pipe the rest of the original headers safely
+	for k, vv := range r.Header {
+		kLow := strings.ToLower(k)
+		if kLow == "connection" || kLow == "upgrade" || kLow == "host" {
+			continue // Avoid duplicates
 		}
-		io.Copy(backend, clientConn)
-	}()
+		for _, v := range vv {
+			fmt.Fprintf(backend, "%s: %s\r\n", k, v)
+		}
+	}
+	fmt.Fprintf(backend, "\r\n")
 
-	go func() {
-		defer clientConn.Close()
-		io.Copy(clientConn, backend)
-	}()
-
-	return true
+	// 4. Create bidirectional byte tunnel
+	go io.Copy(backend, clientConn)
+	io.Copy(clientConn, backend)
 }
 
 func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
@@ -232,46 +231,37 @@ func setupMultiplexer(mux *http.ServeMux, frpPort, vhostPort, pluginPort int) {
 			if err == context.Canceled || err == io.EOF {
 				return
 			}
-			http.Error(w, "Tunnel warming up...", http.StatusServiceUnavailable)
+			http.Error(w, "Service warming up...", http.StatusServiceUnavailable)
 		}
 		return proxy
 	}
 
-	frpWsProxy := createProxy(frpPort)
 	frpVhostProxy := createProxy(vhostPort)
 	adminApiProxy := createProxy(pluginPort)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		isWebSocket := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
-		
 		isFRPPath := path == "/~!frp" || path == "/~frp" || path == "/_frws" || path == "/_frpc" || path == "/_frpws"
 		
 		userAgent := strings.ToLower(r.Header.Get("User-Agent"))
 		isFrpClient := userAgent == "" || strings.Contains(userAgent, "go-http-client") || strings.Contains(userAgent, "frp")
+		
+		isWebSocketUpgrade := strings.Contains(strings.ToLower(r.Header.Get("Upgrade")), "websocket")
 
-		// Route FRP WebSocket connections (BindPort: 7000)
-		if isFRPPath || (isWebSocket && isFrpClient) {
-			// Attempt pure TCP hijack first to bypass PaaS header stripping
-			if success := proxyRawTCP(w, r, frpPort); success {
-				return
-			}
-
-			// Fallback (only triggers if Hijack fails)
-			r.Header.Set("Connection", "Upgrade")
-			r.Header.Set("Upgrade", "websocket")
-			frpWsProxy.ServeHTTP(w, r)
+		// Route FRP Control Connections safely via manual TCP pipe
+		if isFRPPath || (isFrpClient && (path == "/" || isWebSocketUpgrade)) {
+			proxyFRPControl(w, r, frpPort)
 			return
 		}
 
-		// Route Admin API Connections (PluginPort: 9000)
+		// Route Admin API Connections
 		if strings.HasPrefix(path, "/api/tokens") {
 			adminApiProxy.ServeHTTP(w, r)
 			return
 		}
 
-		// Route App Traffic (VHostPort: 8080)
+		// Route App Traffic
 		frpVhostProxy.ServeHTTP(w, r)
 	})
 }
