@@ -32,11 +32,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/apexkit",
-      "binaries/cloudflared",
-      "binaries/frpc"
-    ],
+    "externalBin": [],
     "windows": {
       "nsis": {
         "installerHooks": "nsis/hooks.nsh",
