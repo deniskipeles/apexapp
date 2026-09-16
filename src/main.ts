@@ -92,6 +92,7 @@ let isScannerRunning = false;
 let selectedPrinterId: string | null = null;
 let selectedPrinterName: string | null = null;
 let allPrinters: any[] = [];
+let hasLoadedPrinters = false;
 
 interface EnvVar { key: string; value: string; }
 let envVars: EnvVar[] = [];
@@ -132,7 +133,12 @@ function switchView(viewName: 'app' | 'dash' | 'settings') {
     handleContentDisplay('dash');
   } else {
     navSettings.classList.add('active'); viewSettings.classList.add('active');
-    loadPrinters();
+    
+    // 👇 ONLY load on first visit:
+    if (!hasLoadedPrinters) {
+      hasLoadedPrinters = true;
+      loadPrinters();
+    }
   }
   if ((viewName === 'app' || viewName === 'dash') && !isServerRunning) startServer();
 }
