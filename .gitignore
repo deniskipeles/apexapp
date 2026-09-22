@@ -23,6 +23,7 @@ server/tunnels.db
 node_modules
 dist
 dist-ssr
+dist-client
 xwin
 .xwin-cache
 *.local
