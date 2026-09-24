@@ -158,7 +158,8 @@ rm -f src-tauri/Cargo.lock
 npm install
 
 echo "🚀 Compiling Tauri application for ${TARGET_TRIPLE}..."
-npm run tauri build -- --target "$TARGET_TRIPLE"
+# npm run tauri build -- --target "$TARGET_TRIPLE"
+npm run tauri build -- --target "$TARGET_TRIPLE" --bundles deb,rpm
 
 echo ""
 echo "🎉 Build finished successfully!"
