@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_printer_v2 as tauri_plugin_printer;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -16,6 +15,19 @@ struct ApexState {
 pub struct EnvVar {
     key: String,
     value: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PrinterInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "Name")]
+    pub system_name: String,
+    pub is_default: bool,
+    #[serde(rename = "Priority")]
+    pub priority: u32,
+    #[serde(rename = "PrinterStatus")]
+    pub printer_status: u32,
 }
 
 #[tauri::command]
@@ -277,12 +289,76 @@ localPort = 5000
     Ok("Starting Tunnel...".to_string())
 }
 
+// ── CROSS-PLATFORM PRINTER COMMANDS ──────────────────────────────────────────
+
+#[tauri::command]
+async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let list = printers::get_printers();
+        let default_name = printers::get_default_printer().map(|p| p.name);
+
+        Ok(list
+            .into_iter()
+            .map(|p| {
+                let is_def = default_name.as_ref().map_or(false, |d| d == &p.name);
+                PrinterInfo {
+                    id: p.name.clone(),
+                    name: p.name.clone(),
+                    system_name: p.name.clone(),
+                    is_default: is_def,
+                    priority: if is_def { 1 } else { 0 },
+                    printer_status: 0, // 0 = Online in main.ts
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn print_file(printer_id: String, file_path: String, _copies: Option<usize>) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let printer = printers::get_printer_by_name(&printer_id)
+            .ok_or_else(|| format!("Printer '{}' not found", printer_id))?;
+
+        printer
+            .print_file(&file_path, printers::common::base::job::PrinterJobOptions::none())
+            .map(|_| true)
+            .map_err(|e| format!("{:?}", e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn print_html(printer_id: String, html: String, _copies: Option<usize>) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let printer = printers::get_printer_by_name(&printer_id)
+            .ok_or_else(|| format!("Printer '{}' not found", printer_id))?;
+
+        let temp_path = std::env::temp_dir().join(format!("print_{}.html", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_path, html.as_bytes()).map_err(|e| e.to_string())?;
+
+        let res = printer.print_file(
+            temp_path.to_str().unwrap(),
+            printers::common::base::job::PrinterJobOptions::none(),
+        );
+
+        let _ = std::fs::remove_file(temp_path);
+        res.map(|_| true).map_err(|e| format!("{:?}", e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_printer::init())
         .manage(ApexState {
             apex_process: Mutex::new(None),
             tunnel_process: Mutex::new(None),
@@ -296,15 +372,22 @@ pub fn run() {
             toggle_apex_tunnel,
             get_env_vars,
             save_env_vars,
+            get_printers,
+            print_file,
+            print_html,
         ])
         .on_page_load(|window, _payload| {
             let _ = window.eval(r#"
                 window.__apexapp_tools__ = {
-                    search_printers: () => window.__TAURI__.core.invoke('plugin:printer|get_printers'),
-                    print_html: (printer, html, copies) => window.__TAURI__.core.invoke('plugin:printer|print_html', {
-                        id: crypto.randomUUID(),
-                        printer,
-                        html,
+                    search_printers: () => window.__TAURI__.core.invoke('get_printers'),
+                    print_html: (printer, html, copies) => window.__TAURI__.core.invoke('print_html', {
+                        printer_id: printer,
+                        html: html,
+                        copies: copies || 1
+                    }),
+                    print_file: (printer, file_path, copies) => window.__TAURI__.core.invoke('print_file', {
+                        printer_id: printer,
+                        file_path: file_path,
                         copies: copies || 1
                     }),
                     start_scan: () => new Promise((resolve, reject) => {

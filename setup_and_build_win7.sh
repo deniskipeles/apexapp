@@ -7,37 +7,33 @@ WEBVIEW2_CAB_URL="https://github.com/westinyang/WebView2RuntimeArchive/releases/
 TARGET_TRIPLE="x86_64-pc-windows-msvc"
 # ---------------------
 
-echo "🚀 Starting Windows 7 (Offline) Build Setup..."
+echo "🚀 Starting Windows 7 (Offline Fixed WebView2) Build Setup..."
 
-# 1. Install System Dependencies (Linux only)
+# 1. System Dependencies (Linux host)
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    echo "📦 Installing build dependencies..."
+    echo "📦 Checking build dependencies..."
     if command -v sudo &> /dev/null; then
         sudo apt-get update
         sudo apt-get install -y build-essential curl wget jq file libssl-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev xdg-utils nsis lld llvm clang unzip cabextract
-    else
-        echo "⚠️  sudo not found, assuming dependencies are pre-installed."
     fi
 fi
 
-# 2. Install Rust target
+# 2. Rust target
 echo "🦀 Adding Rust target ${TARGET_TRIPLE}..."
 rustup target add ${TARGET_TRIPLE}
 
-# 3. Install Cross Compilation Tools
-echo "🛠️  Checking/Installing cross-compilation tools..."
+# 3. Cross-compilation tools
 if ! command -v cargo-xwin &> /dev/null; then cargo install cargo-xwin; fi
 if ! command -v xwin &> /dev/null; then cargo install xwin; fi
 
-# 4. Prepare xwin (SDK/CRT)
+# 4. Prepare Windows SDK/CRT
 if [ ! -d "xwin" ]; then
     echo "📥 Downloading Windows SDK/CRT via xwin..."
     yes yes | xwin splat --output xwin
 fi
 
-# 5. Configure Linker for Win7 Target
-echo "🔗 Configuring linker..."
+# 5. Configure Linker
 mkdir -p src-tauri/.cargo
 cat > src-tauri/.cargo/config.toml <<EOT
 [target.${TARGET_TRIPLE}]
@@ -50,65 +46,32 @@ TARGET_DIR="src-tauri/binaries"
 mkdir -p "$TARGET_DIR"
 
 # ApexKit
-SIDECAR_NAME="apexkit"
-REPO_OWNER="deniskipeles"
-REPO_NAME="apexkit" # Fixed from apex-kit
-TARGET_FILE="${TARGET_DIR}/${SIDECAR_NAME}-${TARGET_TRIPLE}.exe"
-
-echo "🔍 Fetching latest Windows release metadata for ApexKit..."
-RELEASE_JSON=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
-ASSET_DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets // [] | .[] | select(.name | contains("windows") or contains("pc-windows-msvc")) | .browser_download_url' | head -n 1)
-
-if [ -z "$ASSET_DOWNLOAD_URL" ] || [ "$ASSET_DOWNLOAD_URL" = "null" ]; then
-    echo "⚠️  Could not find Windows binary in latest release of $REPO_NAME. Skipping download."
-else
-    echo "📥 Downloading ApexKit from $ASSET_DOWNLOAD_URL..."
-    
+TARGET_FILE="${TARGET_DIR}/apexkit-${TARGET_TRIPLE}.exe"
+if [ ! -f "$TARGET_FILE" ]; then
+    echo "🔍 Fetching ApexKit Windows binary..."
+    HF_URL="https://huggingface.co/datasets/kipeles/apexkit-releases/resolve/main/v0.1.0-beta.1/apexkit-x86_64-pc-windows-gnu-perf.zip?download=true"
     TEMP_DIR=$(mktemp -d)
-    TEMP_FILE="$TEMP_DIR/downloaded_file"
-
-    HTTP_CODE=$(curl -L -w "%{http_code}" "$ASSET_DOWNLOAD_URL" -o "$TEMP_FILE")
-
-    if [ "$HTTP_CODE" -ne 200 ]; then
-        echo "❌ Download Failed with HTTP Status: $HTTP_CODE"
-        rm -rf "$TEMP_DIR"
-        exit 1
-    fi
-
-    if [[ "$ASSET_DOWNLOAD_URL" == *.tar.gz ]]; then
-        echo "📦 Extracting .tar.gz archive..."
-        tar -xzf "$TEMP_FILE" -C "$TEMP_DIR"
-        find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
-    elif [[ "$ASSET_DOWNLOAD_URL" == *.zip ]]; then
-        echo "📦 Extracting .zip archive..."
-        unzip -q "$TEMP_FILE" -d "$TEMP_DIR"
-        find "$TEMP_DIR" -type f \( -name "apexkit" -o -name "apexkit.exe" \) -exec mv {} "$TARGET_FILE" \;
-    else
-        echo "📄 Raw binary detected..."
-        mv "$TEMP_FILE" "$TARGET_FILE"
-    fi
-
+    curl -L "$HF_URL" -o "$TEMP_DIR/apexkit.zip"
+    unzip -q "$TEMP_DIR/apexkit.zip" -d "$TEMP_DIR"
+    find "$TEMP_DIR" -type f -name "apexkit.exe" -exec mv {} "$TARGET_FILE" \;
     chmod +x "$TARGET_FILE"
     rm -rf "$TEMP_DIR"
-    echo "✅ ApexKit sidecar updated."
 fi
+echo "✅ ApexKit sidecar ready."
 
 # Cloudflared
-CF_WIN_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 CF_TARGET_FILE="${TARGET_DIR}/cloudflared-${TARGET_TRIPLE}.exe"
-
 if [ ! -f "$CF_TARGET_FILE" ]; then
     echo "📥 Downloading cloudflared (Windows)..."
-    curl -L "$CF_WIN_URL" -o "$CF_TARGET_FILE"
+    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -o "$CF_TARGET_FILE"
     chmod +x "$CF_TARGET_FILE"
 fi
-echo "✅ Cloudflared sidecar updated."
+echo "✅ Cloudflared sidecar ready."
 
 # FRPC
-FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
 FRPC_TARGET_FILE="${TARGET_DIR}/frpc-${TARGET_TRIPLE}.exe"
-
 if [ ! -f "$FRPC_TARGET_FILE" ]; then
+    FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     echo "📥 Downloading frpc v${FRP_VER} for Windows..."
     curl -L "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_windows_amd64.zip" -o frp.zip
     unzip -q frp.zip
@@ -116,64 +79,58 @@ if [ ! -f "$FRPC_TARGET_FILE" ]; then
     chmod +x "$FRPC_TARGET_FILE"
     rm -rf frp*
 fi
-echo "✅ frpc Windows sidecar updated."
+echo "✅ frpc sidecar ready."
 
 # 7. DOWNLOAD & EXTRACT WEBVIEW2 FIXED RUNTIME
-echo "🌐 Preparing WebView2 Fixed Runtime..."
+echo "🌐 Preparing WebView2 Fixed Runtime v${WEBVIEW2_VERSION}..."
 WEBVIEW_DIR="src-tauri/webview2"
 FIXED_PATH="$WEBVIEW_DIR/fixed"
 mkdir -p "$FIXED_PATH"
 
-# FIX: Explicitly check for the executable to bypass the .gitkeep issue!
 if [ ! -f "$FIXED_PATH/msedgewebview2.exe" ]; then
-    if command -v cabextract &> /dev/null; then
-        echo "📥 Downloading WebView2 CAB..."
-        curl -L -o "webview2.cab" "$WEBVIEW2_CAB_URL"
-        echo "📂 Extracting Fixed Runtime..."
-        cabextract -d "$FIXED_PATH" "webview2.cab"
+    echo "📥 Downloading WebView2 CAB..."
+    curl -L -o "webview2.cab" "$WEBVIEW2_CAB_URL"
+    echo "📂 Extracting Fixed Runtime..."
+    cabextract -d "$FIXED_PATH" "webview2.cab"
 
-        # Flatten structure if the CAB extracted to a subfolder
-        SUBFOLDER=$(find "$FIXED_PATH" -maxdepth 1 -type d -name "Microsoft.WebView2.*" | head -n 1)
-        if [ -n "$SUBFOLDER" ]; then
-            echo "🧹 Flattening directory structure..."
-            mv "$SUBFOLDER"/* "$FIXED_PATH/"
-            rmdir "$SUBFOLDER"
-        fi
-        rm -f "webview2.cab"
-        echo "✅ WebView2 Fixed Runtime ready."
-    else
-        echo "❌ cabextract not found! Cannot extract WebView2."
-        exit 1
+    # Flatten nested folder if cabextract placed files into a subfolder
+    SUBFOLDER=$(find "$FIXED_PATH" -maxdepth 1 -type d -name "Microsoft.WebView2.*" | head -n 1)
+    if [ -n "$SUBFOLDER" ]; then
+        echo "🧹 Flattening directory structure..."
+        mv "$SUBFOLDER"/* "$FIXED_PATH/"
+        rmdir "$SUBFOLDER"
     fi
-else
-    echo "✅ WebView2 Fixed Runtime already prepared."
+    rm -f "webview2.cab"
 fi
 
-# 8. Build
-npm install
+if [ ! -f "$FIXED_PATH/msedgewebview2.exe" ]; then
+    echo "❌ Error: msedgewebview2.exe not found in $FIXED_PATH!"
+    exit 1
+fi
+echo "✅ WebView2 Fixed Runtime verified."
 
-echo "🗑️ Removing newer Cargo.lock to prevent version conflict..."
+# 8. BUILD
+npm install
 rm -f src-tauri/Cargo.lock
 
-echo "🛠️ Patching tauri.conf.json for Windows 7 build..."
+echo "🛠️ Patching tauri.conf.json with relative Fixed Runtime & resources..."
 cp src-tauri/tauri.conf.json src-tauri/tauri.conf.json.bak
 
-# FIX: Use absolute path so Tauri doesn't get confused resolving relative paths during cross-compilation
-FIXED_ABS_PATH="$(cd src-tauri/webview2/fixed && pwd)"
-
-jq --arg p "$FIXED_ABS_PATH" '.bundle.windows.webviewInstallMode = {
+# 1. Use relative path "./webview2/fixed"
+# 2. Add to bundle.resources to FORCE makensis to pack the files
+jq '.bundle.windows.webviewInstallMode = {
   "type": "fixedRuntime",
-  "path": $p
-} | .productName = "apexapp-win7"' src-tauri/tauri.conf.json > temp_tauri_conf.json && mv temp_tauri_conf.json src-tauri/tauri.conf.json
+  "path": "./webview2/fixed"
+} | .bundle.resources = ((.bundle.resources // []) + ["webview2/fixed/**/*"]) | .productName = "apexapp-win7"' \
+src-tauri/tauri.conf.json > temp_tauri_conf.json && mv temp_tauri_conf.json src-tauri/tauri.conf.json
 
-# Build
-echo "🚀 BUILDING WINDOWS 7 OFFLINE INSTALLER..."
+echo "🚀 BUILDING WINDOWS 7 OFFLINE INSTALLER (NSIS)..."
 export RUSTFLAGS="-Lnative=$(pwd)/xwin/crt/lib/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/um/x86_64 -Lnative=$(pwd)/xwin/sdk/lib/ucrt/x86_64"
 npm run tauri build -- --target ${TARGET_TRIPLE}
 
-# Clean up
 echo "🧹 Reverting tauri.conf.json..."
 mv src-tauri/tauri.conf.json.bak src-tauri/tauri.conf.json
 
-echo "✅ DONE"
-echo "📁 Installer located in: src-tauri/target/${TARGET_TRIPLE}/release/bundle/nsis/"
+echo "🎉 DONE!"
+echo "📁 Resulting installer (~180MB - 220MB):"
+ls -lh src-tauri/target/${TARGET_TRIPLE}/release/bundle/nsis/*.exe

@@ -402,12 +402,11 @@ async function loadPrinters() {
   printerList.innerHTML = `<div style="color:#64748b;font-style:italic;font-size:0.85rem;">Scanning...</div>`;
   try {
     const result = await (window as any).__apexapp_tools__.search_printers();
-    allPrinters = (typeof result === 'string' ? JSON.parse(result) : result).map((p: any) => ({
-      id: p.Name || p.id,
-      name: p.Name || p.printerName || p.name || 'Unknown',
-      isOnline: p.PrinterStatus === 0,
-      isDefault: p.Priority === 1,
-      _raw: p,
+    allPrinters = result.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      isOnline: true,
+      isDefault: p.is_default,
     }));
     renderPrinterList(allPrinters);
     printerStatusText.textContent = `${allPrinters.length} printer(s) found`;
