@@ -8,6 +8,7 @@ TARGET_TRIPLE="x86_64-apple-darwin"
 HF_DATASET="kipeles/apexkit-releases"
 APEXKIT_VERSION="v0.1.0-beta.1"
 VARIANT="perf" # "perf" (23.4 MB) or "small" (18.8 MB)
+FRP_VER="0.71.0" # Pinned to bypass GitHub API rate limits in CI
 
 TARGET_DIR="src-tauri/binaries"
 mkdir -p "$TARGET_DIR"
@@ -57,10 +58,9 @@ if [ ! -f "$CF_TARGET_FILE" ]; then
 fi
 echo "✅ Cloudflared sidecar ready."
 
-# 4. Download FRPC (macOS amd64)
+# 4. Download FRPC (macOS amd64) - Direct static download (No API rate limits)
 FRPC_TARGET_FILE="${TARGET_DIR}/frpc-${TARGET_TRIPLE}"
 if [ ! -f "$FRPC_TARGET_FILE" ]; then
-    FRP_VER=$(curl -s "https://api.github.com/repos/fatedier/frp/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     echo "📥 Downloading frpc v${FRP_VER} (macOS amd64)..."
     curl -L "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_darwin_amd64.tar.gz" -o "$TEMP_DIR/frp.tar.gz"
     tar -xzf "$TEMP_DIR/frp.tar.gz" -C "$TEMP_DIR"
@@ -83,5 +83,4 @@ npm run tauri build -- --target "$TARGET_TRIPLE"
 
 echo ""
 echo "🎉 Build complete!"
-echo "📁 Output bundles located in: src-tauri/target/${TARGET_TRIPLE}/release/bundle/dmg/"
 ls -lh "src-tauri/target/${TARGET_TRIPLE}/release/bundle/dmg/"*.dmg 2>/dev/null || true
