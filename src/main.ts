@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import QRCode from 'qrcode';
+import { BrowserMultiFormatReader } from '@zxing/browser';
+import { DecodeHintType, BarcodeFormat } from '@zxing/library';
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
 const navApp = document.querySelector("#nav-app") as HTMLButtonElement;
@@ -21,6 +23,8 @@ const frameApp = document.querySelector("#frame-app") as HTMLIFrameElement;
 const loaderApp = document.querySelector("#loader-app") as HTMLElement;
 const frameDash = document.querySelector("#frame-dash") as HTMLIFrameElement;
 const loaderDash = document.querySelector("#loader-dash") as HTMLElement;
+
+const btnCloseApp = document.querySelector("#btn-close-app") as HTMLButtonElement;
 
 // ── TUNNEL ────────────────────────────────────────────────────────────────────
 const btnToggleTunnel = document.querySelector("#btn-toggle-tunnel") as HTMLButtonElement;
@@ -79,8 +83,6 @@ const scannerDot = document.querySelector("#scanner-dot") as HTMLElement;
 const scannerStatusText = document.querySelector("#scanner-status-text") as HTMLElement;
 const scannerResultBox = document.querySelector("#scanner-result-box") as HTMLElement;
 const scannerResultText = document.querySelector("#scanner-result-text") as HTMLElement;
-const btnStartScan = document.querySelector("#btn-start-scan") as HTMLButtonElement;
-const btnCancelScan = document.querySelector("#btn-cancel-scan") as HTMLButtonElement;
 const btnCopyScan = document.querySelector("#btn-copy-scan") as HTMLButtonElement;
 
 // ── STATE ─────────────────────────────────────────────────────────────────────
@@ -88,7 +90,6 @@ let isServerRunning = false;
 let isTunnelRunning = false;
 let isCustomDomain = false;
 let isApexTunnelRunning = false;
-let isScannerRunning = false;
 let selectedPrinterId: string | null = null;
 let selectedPrinterName: string | null = null;
 let allPrinters: any[] = [];
@@ -168,12 +169,54 @@ async function startServer() {
   }
 }
 
+// 1. Close application button
+btnCloseApp?.addEventListener("click", () => {
+  if (confirm("Are you sure you want to close ApexApp?")) {
+    invoke("close_app");
+  }
+});
+
+// 2. Start / Stop Server Toggle
+serverBtn.addEventListener("click", async () => {
+  if (!isServerRunning) {
+    await startServer();
+  } else {
+    await stopServer();
+  }
+});
+
+async function stopServer() {
+  serverBtn.disabled = true;
+  serverBtn.textContent = "Stopping...";
+  try {
+    await invoke("stop_apex_sidecar");
+    setServerStoppedState();
+  } catch (err) {
+    console.error("Failed to stop server:", err);
+    serverBtn.disabled = false;
+  }
+}
+
 function setServerRunningState() {
   isServerRunning = true;
   statusText.textContent = "Running";
   statusDot.classList.add("running");
-  serverBtn.textContent = "Running";
-  serverBtn.disabled = true;
+  serverBtn.textContent = "Stop Server";
+  serverBtn.style.backgroundColor = "#dc2626"; // Red when running
+  serverBtn.disabled = false;
+}
+
+function setServerStoppedState() {
+  isServerRunning = false;
+  statusText.textContent = "Stopped";
+  statusDot.classList.remove("running");
+  serverBtn.textContent = "Start Server";
+  serverBtn.style.backgroundColor = ""; // Reset to primary color
+  serverBtn.disabled = false;
+  frameApp.src = "about:blank";
+  frameDash.src = "about:blank";
+  loaderApp.style.display = "flex";
+  loaderDash.style.display = "flex";
 }
 
 async function waitForServer(retries = 30) {
@@ -500,116 +543,303 @@ function disconnectPrinter() {
 btnScanPrinters.addEventListener("click", loadPrinters);
 btnDisconnectPrinter.addEventListener("click", disconnectPrinter);
 
-// ── SCANNER ───────────────────────────────────────────────────────────────────
-// Replace the entire startScan function with this:
-function startScan() {
-  if (isScannerRunning) return;
-  isScannerRunning = true;
-  scannerStatusText.textContent = "Waiting for scan... (point USB scanner at barcode)";
-  scannerDot.classList.add("running");
-  btnStartScan.style.display = "none";
-  btnCancelScan.style.display = "block";
+// ── SCANNER (CAMERA & USB SEPARATED) ──────────────────────────────────────────
 
-  // Create hidden input to capture USB scanner keystrokes
-  let hiddenInput = document.getElementById('usb-scanner-input') as HTMLInputElement;
+// DOM: Camera Modal & Controls
+const cameraModal = document.getElementById("camera-modal") as HTMLElement;
+const cameraPreview = document.getElementById("camera-preview") as HTMLVideoElement;
+const btnCloseCamera = document.getElementById("btn-close-camera") as HTMLButtonElement;
+const cameraScanStatus = document.getElementById("camera-scan-status") as HTMLElement;
+
+// DOM: Settings Page Scan Buttons
+const btnStartCameraScan = document.getElementById("btn-start-camera-scan") as HTMLButtonElement;
+const btnStartUsbScan = document.getElementById("btn-start-usb-scan") as HTMLButtonElement;
+const btnCancelUsbScan = document.getElementById("btn-cancel-usb-scan") as HTMLButtonElement;
+
+let codeReader: BrowserMultiFormatReader | null = null;
+let cameraControls: any = null;
+let isUsbScannerActive = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODE 1: LAPTOP WEBCAM SCANNER (ZXing Engine)
+// ─────────────────────────────────────────────────────────────────────────────
+async function startCameraScan() {
+  cameraModal.style.display = "flex";
+  cameraScanStatus.textContent = "Starting camera...";
+  cameraScanStatus.style.color = "#64748b";
+
+  try {
+    if (!codeReader) {
+      const hints = new Map();
+      hints.set(DecodeHintType.TRY_HARDER, true);
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.QR_CODE,
+      ]);
+      codeReader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 80 });
+    }
+
+    cameraScanStatus.textContent = "Center barcode in box (~15-20cm away)...";
+
+    // Define the scan callback to avoid repeating code
+    const onScanResult = (result: any, _err: any) => {
+      if (result) {
+        const scannedText = result.getText();
+        console.log("✅ [Camera] Scanned barcode:", scannedText);
+        playBeep();
+        stopCameraScan();
+        handleScanResult(scannedText, "Camera");
+      }
+    };
+
+    try {
+      // 1. Try safely asking for 1080p without forcing it (no 'min' or 'facingMode')
+      cameraControls = await codeReader.decodeFromConstraints(
+        {
+          video: {
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        },
+        cameraPreview,
+        onScanResult
+      );
+    } catch (highResErr) {
+      console.warn("High-res camera request failed, falling back to default...", highResErr);
+      
+      // 2. Fallback to the exact method that worked in your first screenshot
+      cameraControls = await codeReader.decodeFromVideoDevice(
+        undefined, 
+        cameraPreview, 
+        onScanResult
+      );
+    }
+  } catch (err: any) {
+    console.error("Camera error:", err);
+    cameraScanStatus.textContent = `Camera error: ${err.message || 'Permission denied'}`;
+    cameraScanStatus.style.color = "#ef4444";
+  }
+}
+
+function stopCameraScan() {
+  if (cameraControls) {
+    cameraControls.stop();
+    cameraControls = null;
+  }
+
+  // Release camera device handle cleanly
+  if (cameraPreview && cameraPreview.srcObject) {
+    const stream = cameraPreview.srcObject as MediaStream;
+    stream.getTracks().forEach((track) => track.stop());
+    cameraPreview.srcObject = null;
+  }
+
+  cameraModal.style.display = "none";
+}
+
+btnCloseCamera?.addEventListener("click", stopCameraScan);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODE 2: USB / WIRELESS BARCODE SCANNER (Keyboard Wedge)
+// ─────────────────────────────────────────────────────────────────────────────
+function startUsbScan() {
+  if (isUsbScannerActive) return;
+  isUsbScannerActive = true;
+
+  scannerStatusText.textContent = "Armed: Point handheld USB scanner at barcode...";
+  scannerDot.classList.add("running");
+  btnStartUsbScan.style.display = "none";
+  btnCancelUsbScan.style.display = "inline-block";
+
+  let hiddenInput = document.getElementById("usb-scanner-input") as HTMLInputElement;
   if (!hiddenInput) {
-    hiddenInput = document.createElement('input');
-    hiddenInput.id = 'usb-scanner-input';
+    hiddenInput = document.createElement("input");
+    hiddenInput.id = "usb-scanner-input";
     hiddenInput.style.cssText = "position:fixed;opacity:0;top:0;left:0;width:1px;height:1px;";
     document.body.appendChild(hiddenInput);
   }
-  hiddenInput.value = '';
+  hiddenInput.value = "";
   hiddenInput.focus();
 
-  let scanBuffer = '';
+  let scanBuffer = "";
   let scanTimer: ReturnType<typeof setTimeout>;
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       if (scanBuffer.length > 2) {
         cleanup();
-        handleScanResult(scanBuffer);
+        playBeep();
+        handleScanResult(scanBuffer, "USB Scanner");
       }
-      scanBuffer = '';
+      scanBuffer = "";
       return;
     }
     scanBuffer += e.key;
     clearTimeout(scanTimer);
-    // If no new key in 100ms, treat as complete scan
     scanTimer = setTimeout(() => {
       if (scanBuffer.length > 2) {
         cleanup();
-        handleScanResult(scanBuffer);
+        playBeep();
+        handleScanResult(scanBuffer, "USB Scanner");
       }
-      scanBuffer = '';
+      scanBuffer = "";
     }, 100);
   };
 
   const cleanup = () => {
-    hiddenInput.removeEventListener('keydown', onKey);
-    (btnCancelScan as any)._stop = null;
-    resetScannerUI();
+    hiddenInput.removeEventListener("keydown", onKey);
+    (btnCancelUsbScan as any)._stop = null;
+    resetUsbScannerUI();
   };
 
-  hiddenInput.addEventListener('keydown', onKey);
-  (btnCancelScan as any)._stop = () => {
+  hiddenInput.addEventListener("keydown", onKey);
+  (btnCancelUsbScan as any)._stop = () => {
     cleanup();
-    scannerStatusText.textContent = "Cancelled";
+    scannerStatusText.textContent = "USB scan cancelled";
     scannerDot.classList.remove("running");
   };
 }
 
-btnCancelScan.addEventListener("click", () => {
-  if ((btnCancelScan as any)._stop) (btnCancelScan as any)._stop();
+function resetUsbScannerUI() {
+  isUsbScannerActive = false;
+  btnStartUsbScan.style.display = "inline-block";
+  btnCancelUsbScan.style.display = "none";
+}
+
+btnCancelUsbScan?.addEventListener("click", () => {
+  if ((btnCancelUsbScan as any)._stop) (btnCancelUsbScan as any)._stop();
 });
 
-function handleScanResult(value: string) {
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED RESULT DISPATCHER
+// ─────────────────────────────────────────────────────────────────────────────
+function handleScanResult(value: string, source: "Camera" | "USB Scanner" = "USB Scanner") {
   scannerResultText.textContent = value;
   scannerResultBox.style.display = "block";
-  scannerStatusText.textContent = "Scan complete";
+  scannerStatusText.textContent = `Scanned via ${source}`;
   scannerDot.classList.remove("running");
-  resetScannerUI();
-  broadcastToFrames({ type: "__apexapp_scan_result", value });
+  resetUsbScannerUI();
+
+  // Send result to the iframe POS app
+  broadcastToFrames({ type: "__apexapp_scan_result", value, source });
 }
 
-function resetScannerUI() {
-  isScannerRunning = false;
-  btnStartScan.style.display = "block";
-  btnCancelScan.style.display = "none";
-}
+// Wire up individual Settings buttons
+btnStartCameraScan?.addEventListener("click", startCameraScan);
+btnStartUsbScan?.addEventListener("click", startUsbScan);
 
-btnStartScan.addEventListener("click", startScan);
-
-btnCopyScan.addEventListener("click", () => {
+btnCopyScan?.addEventListener("click", () => {
   navigator.clipboard.writeText(scannerResultText.textContent || "");
   const orig = btnCopyScan.textContent;
   btnCopyScan.textContent = "Copied!";
-  setTimeout(() => btnCopyScan.textContent = orig, 2000);
+  setTimeout(() => (btnCopyScan.textContent = orig), 2000);
 });
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 1200;
+    osc.type = "sine";
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    osc.start();
+    setTimeout(() => {
+      osc.stop();
+      ctx.close();
+    }, 100);
+  } catch (_) {}
+}
+
 
 // ── POSTMESSAGE BRIDGE (iframe → native) ─────────────────────────────────────
 window.addEventListener("message", async (event) => {
   const { type, payload } = event.data || {};
 
-  if (type === "__apexapp_print_request") {
-    if (!selectedPrinterId) {
-      event.source?.postMessage({ type: "__apexapp_print_response", error: "No printer connected" }, { targetOrigin: "*" });
-      return;
-    }
-    try {
-      if (payload?.html) {
-        await invoke("print_html", { printer_id: selectedPrinterId, html: payload.html, copies: payload.copies });
-      } else if (payload?.file_path) {
-        await invoke("print_file", { printer_id: selectedPrinterId, file_path: payload.file_path, copies: payload.copies });
-      }
-      event.source?.postMessage({ type: "__apexapp_print_response", success: true }, { targetOrigin: "*" });
-    } catch (err) {
-      event.source?.postMessage({ type: "__apexapp_print_response", error: String(err) }, { targetOrigin: "*" });
+  // 1. Explicit Camera Scan Request
+  if (type === "__apexapp_camera_scan_request") {
+    await startCameraScan();
+  }
+
+  // 2. Explicit USB Scanner Arm Request
+  if (type === "__apexapp_usb_scan_request") {
+    startUsbScan();
+  }
+
+  // 3. Generic Scan Request (defaults to camera if requested, otherwise USB)
+  if (type === "__apexapp_scan_request") {
+    if (payload?.mode === "camera") {
+      await startCameraScan();
+    } else {
+      startUsbScan();
     }
   }
 
-  if (type === "__apexapp_scan_request") {
-    await startScan();
+  if (type === "__apexapp_print_request") {
+    try {
+      const isPdfVirtual = !selectedPrinterId || 
+        selectedPrinterId.toLowerCase().includes("pdf") || 
+        selectedPrinterName?.toLowerCase().includes("pdf");
+
+      if (isPdfVirtual) {
+        // --- 1. SILENT UNIVERSAL PDF SAVER ---
+        // Render HTML to hidden canvas / PDF and save to disk with NO DIALOGS
+        const fileName = `Receipt_${Date.now()}.html`;
+        
+        // Use a hidden iframe to render the HTML into a printable document
+        const printFrame = document.createElement('iframe');
+        printFrame.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:300px;height:1000px;border:0;";
+        document.body.appendChild(printFrame);
+
+        const doc = printFrame.contentDocument || printFrame.contentWindow?.document;
+        if (!doc) throw new Error("Could not access print frame");
+
+        doc.open();
+        doc.write(payload.html);
+        doc.close();
+
+        // For testing / digital receipts: save raw receipt data or render to disk
+        const blob = new Blob([payload.html], { type: 'text/html' });
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = async () => {
+          try {
+            const savedPath = await invoke("save_receipt_pdf", {
+              payload: {
+                file_name: fileName, // or .pdf
+                pdf_base64: reader.result as string,
+              }
+            });
+            console.log("✅ Receipt saved silently:", savedPath);
+            document.body.removeChild(printFrame);
+            event.source?.postMessage({ type: "__apexapp_print_response", success: true, savedPath }, { targetOrigin: "*" });
+          } catch (err: any) {
+            document.body.removeChild(printFrame);
+            event.source?.postMessage({ type: "__apexapp_print_response", error: String(err) }, { targetOrigin: "*" });
+          }
+        };
+        return;
+      }
+
+      // --- 2. SILENT HARDWARE THERMAL PRINTER ---
+      await invoke("print_to_hardware", {
+        printer_id: selectedPrinterId,
+        raw_content: payload.html,
+      });
+
+      event.source?.postMessage({ type: "__apexapp_print_response", success: true }, { targetOrigin: "*" });
+    } catch (err: any) {
+      console.error("Print failed:", err);
+      event.source?.postMessage({ type: "__apexapp_print_response", error: String(err.message || err) }, { targetOrigin: "*" });
+    }
   }
 
   if (type === "__apexapp_get_printer") {

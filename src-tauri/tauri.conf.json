@@ -15,11 +15,12 @@
       {
         "title": "apexapp",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "devtools": true
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5000 ws://localhost:5000 data:;"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5000 ws://localhost:5000 data: blob: mediastream:;"
     }
   },
   "bundle": {

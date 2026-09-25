@@ -84,9 +84,9 @@ jobs:
           path: ./xwin
           key: ${{ runner.os }}-xwin-sdk
 
-      - name: Setup QEMU for ARM64 Execution
-        if: matrix.name == 'linux-arm64'
-        uses: docker/setup-qemu-action@v3
+      # - name: Setup QEMU for ARM64 Execution
+      #   if: matrix.name == 'linux-arm64'
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Make Script Executable & Run Build
         run: |

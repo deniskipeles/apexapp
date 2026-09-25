@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -28,6 +29,12 @@ pub struct PrinterInfo {
     pub priority: u32,
     #[serde(rename = "PrinterStatus")]
     pub printer_status: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SavePdfPayload {
+    pub file_name: String,
+    pub pdf_base64: String,
 }
 
 #[tauri::command]
@@ -289,8 +296,10 @@ localPort = 5000
     Ok("Starting Tunnel...".to_string())
 }
 
-// ── CROSS-PLATFORM PRINTER COMMANDS ──────────────────────────────────────────
+// ── UNIVERSAL CROSS-PLATFORM PRINTING & DOCUMENT ENGINE ─────────────────────
 
+/// Queries installed printers natively:
+/// WinSpool on Windows, CUPS on Linux and macOS.
 #[tauri::command]
 async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -307,7 +316,7 @@ async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
                     system_name: p.name.clone(),
                     is_default: is_def,
                     priority: if is_def { 1 } else { 0 },
-                    printer_status: 0, // 0 = Online in main.ts
+                    printer_status: 0, // 0 = Online
                 }
             })
             .collect())
@@ -316,6 +325,54 @@ async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Universal Silent Receipt Saver (Windows, Linux, macOS)
+/// Saves base64-encoded PDF/HTML receipt data into Documents/ApexApp_Receipts with ZERO prompts.
+#[tauri::command]
+async fn save_receipt_pdf(payload: SavePdfPayload) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let docs_dir = get_documents_dir()
+            .ok_or_else(|| "Could not locate user Documents directory".to_string())?;
+        let receipts_dir = docs_dir.join("ApexApp_Receipts");
+        std::fs::create_dir_all(&receipts_dir).map_err(|e| e.to_string())?;
+
+        let output_path = receipts_dir.join(&payload.file_name);
+        let bytes = base64_decode(&payload.pdf_base64)
+            .map_err(|e| format!("Base64 decoding failed: {}", e))?;
+
+        let mut file = std::fs::File::create(&output_path).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+
+        println!("✅ Receipt saved silently to: {}", output_path.display());
+        Ok(output_path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Universal Hardware Spooler (Windows, Linux, macOS)
+/// Dispatches raw text / ESC-POS / printer stream directly to the OS spooler with ZERO dialogs.
+#[tauri::command]
+async fn print_to_hardware(printer_id: String, raw_content: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let printer = printers::get_printer_by_name(&printer_id)
+            .ok_or_else(|| format!("Printer '{}' not found", printer_id))?;
+
+        let temp_file = std::env::temp_dir().join(format!("spool_{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_file, raw_content.as_bytes()).map_err(|e| e.to_string())?;
+
+        let result = printer.print_file(
+            temp_file.to_str().unwrap(),
+            printers::common::base::job::PrinterJobOptions::none(),
+        );
+
+        let _ = std::fs::remove_file(temp_file);
+        result.map(|_| true).map_err(|e| format!("{:?}", e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Backwards-compatible file printing
 #[tauri::command]
 async fn print_file(printer_id: String, file_path: String, _copies: Option<usize>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -331,25 +388,77 @@ async fn print_file(printer_id: String, file_path: String, _copies: Option<usize
     .map_err(|e| e.to_string())?
 }
 
+/// Backwards-compatible print_html
 #[tauri::command]
 async fn print_html(printer_id: String, html: String, _copies: Option<usize>) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let printer = printers::get_printer_by_name(&printer_id)
-            .ok_or_else(|| format!("Printer '{}' not found", printer_id))?;
+    print_to_hardware(printer_id, html).await
+}
 
-        let temp_path = std::env::temp_dir().join(format!("print_{}.html", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, html.as_bytes()).map_err(|e| e.to_string())?;
+// ── UTILITY HELPERS ─────────────────────────────────────────────────────────
 
-        let res = printer.print_file(
-            temp_path.to_str().unwrap(),
-            printers::common::base::job::PrinterJobOptions::none(),
-        );
+/// Resolves standard Documents directory cross-platform
+fn get_documents_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join("Documents"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join("Documents"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("XDG_DOCUMENTS_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join("Documents")))
+    }
+}
 
-        let _ = std::fs::remove_file(temp_path);
-        res.map(|_| true).map_err(|e| format!("{:?}", e))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+/// Pure Rust Base64 Decoder (Zero external dependencies)
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let clean = if let Some(idx) = input.find(',') {
+        &input[idx + 1..]
+    } else {
+        input
+    };
+
+    let clean = clean.replace(['\r', '\n', ' '], "");
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0;
+
+    for &byte in clean.as_bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let val = TABLE
+            .iter()
+            .position(|&x| x == byte)
+            .ok_or_else(|| "Invalid base64 character".to_string())? as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn stop_apex_sidecar(state: State<'_, ApexState>) -> Result<String, String> {
+    let mut child_guard = state.apex_process.lock().unwrap();
+    if let Some(child) = child_guard.take() {
+        let _ = child.kill();
+        return Ok("Server Stopped".to_string());
+    }
+    Ok("Server was not running".to_string())
+}
+
+#[tauri::command]
+fn close_app(app: AppHandle) {
+    app.exit(0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,12 +476,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             run_apex_sidecar,
+            stop_apex_sidecar,
+            close_app,
             open_separate_window,
             toggle_cf_tunnel,
             toggle_apex_tunnel,
             get_env_vars,
             save_env_vars,
             get_printers,
+            save_receipt_pdf,
+            print_to_hardware,
             print_file,
             print_html,
         ])
