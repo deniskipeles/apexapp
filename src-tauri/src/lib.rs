@@ -35,6 +35,8 @@ pub struct PrinterInfo {
 pub struct SavePdfPayload {
     pub file_name: String,
     pub pdf_base64: String,
+    #[serde(default)]
+    pub custom_dir: Option<String>,
 }
 
 #[tauri::command]
@@ -298,8 +300,6 @@ localPort = 5000
 
 // ── UNIVERSAL CROSS-PLATFORM PRINTING & DOCUMENT ENGINE ─────────────────────
 
-/// Queries installed printers natively:
-/// WinSpool on Windows, CUPS on Linux and macOS.
 #[tauri::command]
 async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -316,7 +316,7 @@ async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
                     system_name: p.name.clone(),
                     is_default: is_def,
                     priority: if is_def { 1 } else { 0 },
-                    printer_status: 0, // 0 = Online
+                    printer_status: 0,
                 }
             })
             .collect())
@@ -325,14 +325,99 @@ async fn get_printers() -> Result<Vec<PrinterInfo>, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Universal Silent Receipt Saver (Windows, Linux, macOS)
-/// Saves base64-encoded PDF/HTML receipt data into Documents/ApexApp_Receipts with ZERO prompts.
+/// Returns the system default receipts folder (Documents/ApexApp_Receipts)
+#[tauri::command]
+fn get_default_receipts_dir() -> Result<String, String> {
+    let docs = get_documents_dir().ok_or_else(|| "Could not locate Documents folder".to_string())?;
+    Ok(docs.join("ApexApp_Receipts").to_string_lossy().to_string())
+}
+
+/// Native directory selection dialog without adding heavy external dependencies
+#[tauri::command]
+async fn select_directory() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            let script = r#"
+                Add-Type -AssemblyName System.Windows.Forms
+                $f = New-Object System.Windows.Forms.FolderBrowserDialog
+                $f.Description = "Select Directory for Saved Print Files"
+                if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                    $f.SelectedPath
+                }
+            "#;
+            if let Ok(output) = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", script])
+                .output()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+            Ok(None)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = std::process::Command::new("osascript")
+                .args(["-e", "POSIX path of (choose folder with prompt \"Select Directory for Saved Print Files:\")"])
+                .output()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(out) = std::process::Command::new("zenity")
+                .args(["--file-selection", "--directory", "--title=Select Directory for Saved Print Files"])
+                .output()
+            {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            } else if let Ok(out) = std::process::Command::new("kdialog")
+                .args(["--getexistingdirectory"])
+                .output()
+            {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+            Ok(None)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Universal Silent Receipt Saver (Saves to user-selected directory or Documents default)
 #[tauri::command]
 async fn save_receipt_pdf(payload: SavePdfPayload) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let docs_dir = get_documents_dir()
-            .ok_or_else(|| "Could not locate user Documents directory".to_string())?;
-        let receipts_dir = docs_dir.join("ApexApp_Receipts");
+        let receipts_dir = if let Some(custom) = &payload.custom_dir {
+            if !custom.trim().is_empty() {
+                std::path::PathBuf::from(custom.trim())
+            } else {
+                let docs_dir = get_documents_dir()
+                    .ok_or_else(|| "Could not locate user Documents directory".to_string())?;
+                docs_dir.join("ApexApp_Receipts")
+            }
+        } else {
+            let docs_dir = get_documents_dir()
+                .ok_or_else(|| "Could not locate user Documents directory".to_string())?;
+            docs_dir.join("ApexApp_Receipts")
+        };
+
         std::fs::create_dir_all(&receipts_dir).map_err(|e| e.to_string())?;
 
         let output_path = receipts_dir.join(&payload.file_name);
@@ -349,8 +434,6 @@ async fn save_receipt_pdf(payload: SavePdfPayload) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Universal Hardware Spooler (Windows, Linux, macOS)
-/// Dispatches raw text / ESC-POS / printer stream directly to the OS spooler with ZERO dialogs.
 #[tauri::command]
 async fn print_to_hardware(printer_id: String, raw_content: String) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -372,7 +455,6 @@ async fn print_to_hardware(printer_id: String, raw_content: String) -> Result<bo
     .map_err(|e| e.to_string())?
 }
 
-/// Backwards-compatible file printing
 #[tauri::command]
 async fn print_file(printer_id: String, file_path: String, _copies: Option<usize>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -388,15 +470,11 @@ async fn print_file(printer_id: String, file_path: String, _copies: Option<usize
     .map_err(|e| e.to_string())?
 }
 
-/// Backwards-compatible print_html
 #[tauri::command]
 async fn print_html(printer_id: String, html: String, _copies: Option<usize>) -> Result<bool, String> {
     print_to_hardware(printer_id, html).await
 }
 
-// ── UTILITY HELPERS ─────────────────────────────────────────────────────────
-
-/// Resolves standard Documents directory cross-platform
 fn get_documents_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -414,7 +492,6 @@ fn get_documents_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Pure Rust Base64 Decoder (Zero external dependencies)
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     let clean = if let Some(idx) = input.find(',') {
         &input[idx + 1..]
@@ -461,8 +538,6 @@ fn close_app(app: AppHandle) {
     app.exit(0);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -484,6 +559,8 @@ pub fn run() {
             get_env_vars,
             save_env_vars,
             get_printers,
+            get_default_receipts_dir,
+            select_directory,
             save_receipt_pdf,
             print_to_hardware,
             print_file,
