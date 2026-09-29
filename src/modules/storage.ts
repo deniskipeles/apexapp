@@ -6,6 +6,8 @@ const defaultSettings: AppSettings = {
   autoStartServer: true,
   openInNewWindow: false,
   dashboardPath: '/_dashboard',
+  wifiSharingEnabled: false,
+  wifiCustomPort: 5000,
   printSaveDir: '',
   printCustomFileName: '',
   printUseTimestamp: true,

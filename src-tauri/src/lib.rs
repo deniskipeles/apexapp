@@ -56,6 +56,58 @@ async fn open_separate_window(app: AppHandle, label: String, title: String, url:
         .build();
 }
 
+/// Resolves the primary local network / Wi-Fi IP address without sending outbound packets
+#[tauri::command]
+fn get_local_ip() -> Result<String, String> {
+    use std::net::UdpSocket;
+
+    // 1. Fast UDP routing query (works offline and online as long as a network interface is active)
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() {
+                    return Ok(ip.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. Windows fallback using PowerShell NetIPAddress
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -ExpandProperty IPAddress -First 1"
+            ])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !ip.is_empty() {
+                return Ok(ip);
+            }
+        }
+    }
+
+    // 3. Linux/macOS fallback
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if let Ok(output) = std::process::Command::new("sh")
+            .args(["-c", "hostname -I 2>/dev/null || ipconfig getifaddr en0 2>/dev/null || ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -n 1"])
+            .output()
+        {
+            let ip = String::from_utf8_lossy(&output.stdout).split_whitespace().next().unwrap_or("").to_string();
+            if !ip.is_empty() {
+                return Ok(ip);
+            }
+        }
+    }
+
+    Ok("127.0.0.1".to_string())
+}
+
 #[tauri::command]
 fn run_apex_sidecar(app: AppHandle, state: State<'_, ApexState>) {
     let mut child_guard = state.apex_process.lock().unwrap();
@@ -68,7 +120,8 @@ fn run_apex_sidecar(app: AppHandle, state: State<'_, ApexState>) {
         .shell()
         .sidecar("apexkit")
         .unwrap()
-        .current_dir(resource_dir);
+        .current_dir(resource_dir)
+        .env("HOST", "0.0.0.0"); // Listen on all network interfaces
 
     match sidecar_command.spawn() {
         Ok((mut rx, child)) => {
@@ -565,6 +618,7 @@ pub fn run() {
             print_to_hardware,
             print_file,
             print_html,
+            get_local_ip,
         ])
         .on_page_load(|window, _payload| {
             let _ = window.eval(r#"

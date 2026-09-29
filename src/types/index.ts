@@ -25,6 +25,8 @@ export interface AppSettings {
   autoStartServer: boolean;
   openInNewWindow: boolean;
   dashboardPath: string;
+  wifiSharingEnabled: boolean;
+  wifiCustomPort: number;
   printSaveDir: string;
   printCustomFileName: string;
   printUseTimestamp: boolean;

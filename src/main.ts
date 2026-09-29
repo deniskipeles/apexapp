@@ -7,6 +7,7 @@ import { ConsoleManager } from './modules/console';
 import { BridgeManager } from './modules/bridge';
 import { ModalManager } from './modules/modal';
 import { SettingsStorage } from './modules/storage';
+import { WifiManager } from './modules/wifi';
 import './styles.css';
 
 // ── NAVIGATION CONTROLLER ───────────────────────────────────────────────────
@@ -115,6 +116,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   EnvManager.init();
   ConsoleManager.init();
   TunnelManager.init();
+  WifiManager.init();
   ServerManager.init();
 
   // 3. Setup Navigation & Dashboard Settings Controls

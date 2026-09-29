@@ -158,4 +158,22 @@ APEX_TUNNEL_SERVER="apexkit.io"
 APEX_TUNNEL_DOMAIN="my-subdomain"
 APEX_TUNNEL_TOKEN="your-frp-token"`,
   },
+
+  wifi: {
+    id: 'wifi',
+    title: 'Local Wi-Fi / LAN Sharing',
+    badge: 'Zero-Latency Local Network',
+    description:
+      'Allows any phone, tablet, POS gun, or secondary laptop on the same Wi-Fi router to open ApexApp directly without passing through the public internet.',
+    messages: [],
+    codeSnippet: `// 1. Any device on the same Wi-Fi opens the detected LAN IP:
+// e.g. http://192.168.1.45:5000
+
+// 2. Detect inside web apps whether running locally or on Wi-Fi:
+const isLocalNetwork = window.location.hostname.startsWith('192.168.') || 
+                       window.location.hostname.startsWith('10.') || 
+                       window.location.hostname === 'localhost';
+
+console.log('Running on Local LAN:', isLocalNetwork);`,
+  },
 };
