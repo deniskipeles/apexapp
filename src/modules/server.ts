@@ -224,6 +224,13 @@ export class ServerManager {
   }
 
   static async fetchBranding() {
+    // If the user set a custom name in Settings, preserve it
+    const savedCustomName = SettingsStorage.get().customAppName;
+    if (savedCustomName && this.appNameEl) {
+      this.appNameEl.textContent = savedCustomName;
+      return;
+    }
+
     try {
       const base = this.getBaseUrl();
       const res = await fetch(`${base}/app-name`);
@@ -233,7 +240,9 @@ export class ServerManager {
       }
       const logoUrl = `${base}/logo?t=${Date.now()}`;
       const imgRes = await fetch(logoUrl, { method: 'HEAD' });
-      if (imgRes.ok && this.appLogoEl) this.appLogoEl.src = logoUrl;
+      if (imgRes.ok && this.appLogoEl && !SettingsStorage.get().customIcon) {
+        this.appLogoEl.src = logoUrl;
+      }
     } catch (_) {}
   }
 

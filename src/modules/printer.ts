@@ -159,7 +159,8 @@ export class PrinterManager {
     this.printerList.innerHTML = `<div style="color:#64748b;font-style:italic;font-size:0.85rem;">Discovering installed printers...</div>`;
 
     try {
-      const result: any[] = await (window as any).__apexapp_tools__.search_printers();
+      // ✅ Directly invoke the Tauri command natively
+      const result: PrinterInfo[] = await invoke('get_printers');
       this.allPrinters = result.map((p) => ({
         id: p.id,
         name: p.name,

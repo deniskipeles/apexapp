@@ -16,6 +16,12 @@ export interface PrintResult {
   error?: string;
 }
 
+export interface ExportResult {
+  success: boolean;
+  filePath?: string;
+  error?: string;
+}
+
 export interface ScanResult {
   value: string;
   source: 'Camera' | 'USB Scanner';
@@ -39,6 +45,8 @@ export interface AppSettings {
   frpServer: string;
   frpDomain: string;
   frpToken: string;
+  customIcon: string | null;
+  customAppName: string | null;
 }
 
 export interface DocSection {

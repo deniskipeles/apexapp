@@ -20,6 +20,8 @@ const defaultSettings: AppSettings = {
   frpServer: 'apexkit.io',
   frpDomain: '',
   frpToken: '',
+  customIcon: null,
+  customAppName: null,
 };
 
 export class SettingsStorage {
