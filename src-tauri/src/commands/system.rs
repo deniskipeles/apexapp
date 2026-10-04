@@ -1,6 +1,7 @@
 use crate::models::{BatteryStatus, NetworkStatus};
 use crate::utils::base64_decode;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_notification::NotificationExt;
 
 #[tauri::command]
 pub fn greet(name: &str) -> String {
@@ -27,7 +28,9 @@ pub fn close_app(app: AppHandle) {
 #[tauri::command]
 pub fn set_kiosk_mode(window: WebviewWindow, enabled: bool) -> Result<(), String> {
     window.set_fullscreen(enabled).map_err(|e| e.to_string())?;
-    window.set_always_on_top(enabled).map_err(|e| e.to_string())?;
+    window
+        .set_always_on_top(enabled)
+        .map_err(|e| e.to_string())?;
     window.set_resizable(!enabled).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -52,7 +55,7 @@ pub async fn authenticate_biometrics(reason: String) -> Result<bool, String> {
                 "#,
                 reason.replace('"', "`\"")
             );
-            let status = std::process::Command::new("powershell")
+            let status = crate::utils::silent_command("powershell")
                 .args(["-NoProfile", "-Command", &script])
                 .status()
                 .map_err(|e| e.to_string())?;
@@ -103,35 +106,62 @@ pub async fn get_battery_status() -> Result<BatteryStatus, String> {
                 "NO_BATTERY"
             }
             "#;
-            if let Ok(out) = std::process::Command::new("powershell")
+            if let Ok(out) = crate::utils::silent_command("powershell")
                 .args(["-NoProfile", "-Command", script])
                 .output()
             {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if text == "NO_BATTERY" || text.is_empty() {
-                    return Ok(BatteryStatus { has_battery: false, percentage: 100, is_charging: true });
+                    return Ok(BatteryStatus {
+                        has_battery: false,
+                        percentage: 100,
+                        is_charging: true,
+                    });
                 }
                 let parts: Vec<&str> = text.split('|').collect();
-                let pct = parts.get(0).and_then(|p| p.parse::<u8>().ok()).unwrap_or(100);
+                let pct = parts
+                    .get(0)
+                    .and_then(|p| p.parse::<u8>().ok())
+                    .unwrap_or(100);
                 let charging = parts.get(1).map_or(false, |c| *c == "True");
-                return Ok(BatteryStatus { has_battery: true, percentage: pct, is_charging: charging });
+                return Ok(BatteryStatus {
+                    has_battery: true,
+                    percentage: pct,
+                    is_charging: charging,
+                });
             }
         }
 
         #[cfg(target_os = "macos")]
         {
-            if let Ok(out) = std::process::Command::new("pmset").arg("-g").arg("batt").output() {
+            if let Ok(out) = std::process::Command::new("pmset")
+                .arg("-g")
+                .arg("batt")
+                .output()
+            {
                 let text = String::from_utf8_lossy(&out.stdout);
                 if let Some(pct_str) = text.split('\t').nth(1) {
-                    if let Some(pct) = pct_str.split('%').next().and_then(|p| p.trim().parse::<u8>().ok()) {
+                    if let Some(pct) = pct_str
+                        .split('%')
+                        .next()
+                        .and_then(|p| p.trim().parse::<u8>().ok())
+                    {
                         let is_charging = text.contains("charging") || text.contains("AC Power");
-                        return Ok(BatteryStatus { has_battery: true, percentage: pct, is_charging });
+                        return Ok(BatteryStatus {
+                            has_battery: true,
+                            percentage: pct,
+                            is_charging,
+                        });
                     }
                 }
             }
         }
 
-        Ok(BatteryStatus { has_battery: false, percentage: 100, is_charging: true })
+        Ok(BatteryStatus {
+            has_battery: false,
+            percentage: 100,
+            is_charging: true,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -181,52 +211,15 @@ pub fn get_local_ip() -> Result<String, String> {
     Ok("127.0.0.1".to_string())
 }
 
+/// Native, zero-delay desktop notification banner
 #[tauri::command]
-pub async fn show_system_notification(title: String, body: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            let script = format!(
-                r#"
-                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-                $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-                $textNodes = $template.GetElementsByTagName("text")
-                $textNodes.Item(0).AppendChild($template.CreateTextNode("{}")) > $null
-                $textNodes.Item(1).AppendChild($template.CreateTextNode("{}")) > $null
-                $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
-                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("ApexApp").Show($toast)
-                "#,
-                title.replace('"', "`\""),
-                body.replace('"', "`\"")
-            );
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .spawn();
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let script = format!(
-                r#"display notification "{}" with title "{}""#,
-                body.replace('"', "\\\""),
-                title.replace('"', "\\\"")
-            );
-            let _ = std::process::Command::new("osascript")
-                .args(["-e", &script])
-                .spawn();
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("notify-send")
-                .args([&title, &body])
-                .spawn();
-        }
-
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+pub async fn show_system_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -265,7 +258,10 @@ pub async fn update_app_icon(
     let image = tauri::image::Image::from_bytes(&bytes).map_err(|e| e.to_string())?;
     window.set_icon(image).map_err(|e| e.to_string())?;
 
-    println!("🎨 Custom window icon updated & persisted to: {}", icon_path.display());
+    println!(
+        "🎨 Custom window icon updated & persisted to: {}",
+        icon_path.display()
+    );
     Ok(icon_path.to_string_lossy().to_string())
 }
 

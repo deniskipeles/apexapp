@@ -31,7 +31,8 @@ pub fn run_apex_sidecar(app: AppHandle, state: State<'_, ApexState>) {
                         }
                         CommandEvent::Stderr(line) => {
                             let out = String::from_utf8_lossy(&line);
-                            let _ = app_handle.emit("sidecar-log", format!("[ApexKit ERROR] {}", out));
+                            let _ =
+                                app_handle.emit("sidecar-log", format!("[ApexKit ERROR] {}", out));
                         }
                         _ => {}
                     }
@@ -71,7 +72,10 @@ pub fn toggle_cf_tunnel(
         return Ok("Tunnel already running".to_string());
     }
 
-    let mut sidecar = app.shell().sidecar("cloudflared").map_err(|e| e.to_string())?;
+    let mut sidecar = app
+        .shell()
+        .sidecar("cloudflared")
+        .map_err(|e| e.to_string())?;
     let is_managed = match &token {
         Some(t) if !t.trim().is_empty() => true,
         _ => false,
@@ -98,16 +102,23 @@ pub fn toggle_cf_tunnel(
                     let line = String::from_utf8_lossy(&line_bytes);
                     let _ = app.emit("sidecar-log", format!("[Tunnel] {}", line));
                     if !is_managed && line.contains(".trycloudflare.com") {
-                        if let Some(url) = line.split_whitespace().find(|w| w.contains("https://")) {
+                        if let Some(url) = line.split_whitespace().find(|w| w.contains("https://"))
+                        {
                             let _ = app.emit("tunnel-url", url);
                         }
                     }
-                    if is_managed && (line.contains("Registered tunnel connection") || line.contains("Connection")) {
+                    if is_managed
+                        && (line.contains("Registered tunnel connection")
+                            || line.contains("Connection"))
+                    {
                         let _ = app.emit("tunnel-managed-connected", "connected");
                     }
                 }
                 CommandEvent::Stdout(line_bytes) => {
-                    let _ = app.emit("sidecar-log", format!("[Tunnel] {}", String::from_utf8_lossy(&line_bytes)));
+                    let _ = app.emit(
+                        "sidecar-log",
+                        format!("[Tunnel] {}", String::from_utf8_lossy(&line_bytes)),
+                    );
                 }
                 _ => {}
             }

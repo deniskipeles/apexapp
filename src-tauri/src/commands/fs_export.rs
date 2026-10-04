@@ -4,7 +4,8 @@ use std::io::Write;
 
 #[tauri::command]
 pub fn get_default_receipts_dir() -> Result<String, String> {
-    let docs = get_documents_dir().ok_or_else(|| "Could not locate Documents folder".to_string())?;
+    let docs =
+        get_documents_dir().ok_or_else(|| "Could not locate Documents folder".to_string())?;
     Ok(docs.join("ApexApp_Receipts").to_string_lossy().to_string())
 }
 
@@ -21,7 +22,7 @@ pub async fn select_directory() -> Result<Option<String>, String> {
                     $f.SelectedPath
                 }
             "#;
-            if let Ok(output) = std::process::Command::new("powershell")
+            if let Ok(output) = crate::utils::silent_command("powershell")
                 .args(["-NoProfile", "-Command", script])
                 .output()
             {
@@ -108,9 +109,7 @@ pub async fn export_file(payload: ExportFilePayload) -> Result<String, String> {
                 .spawn();
 
             #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open")
-                .arg(&output_path)
-                .spawn();
+            let _ = std::process::Command::new("open").arg(&output_path).spawn();
 
             #[cfg(target_os = "linux")]
             let _ = std::process::Command::new("xdg-open")

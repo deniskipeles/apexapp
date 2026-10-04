@@ -71,13 +71,20 @@ pub async fn print_to_hardware(printer_id: String, raw_content: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn print_file(printer_id: String, file_path: String, _copies: Option<usize>) -> Result<bool, String> {
+pub async fn print_file(
+    printer_id: String,
+    file_path: String,
+    _copies: Option<usize>,
+) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let printer = printers::get_printer_by_name(&printer_id)
             .ok_or_else(|| format!("Printer '{}' not found", printer_id))?;
 
         printer
-            .print_file(&file_path, printers::common::base::job::PrinterJobOptions::none())
+            .print_file(
+                &file_path,
+                printers::common::base::job::PrinterJobOptions::none(),
+            )
             .map(|_| true)
             .map_err(|e| format!("{:?}", e))
     })
@@ -86,6 +93,10 @@ pub async fn print_file(printer_id: String, file_path: String, _copies: Option<u
 }
 
 #[tauri::command]
-pub async fn print_html(printer_id: String, html: String, _copies: Option<usize>) -> Result<bool, String> {
+pub async fn print_html(
+    printer_id: String,
+    html: String,
+    _copies: Option<usize>,
+) -> Result<bool, String> {
     print_to_hardware(printer_id, html).await
 }

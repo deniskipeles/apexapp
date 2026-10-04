@@ -4,6 +4,7 @@ import { ScannerManager } from './scanner';
 
 export class BridgeManager {
   private static wakeLockSentinel: any = null;
+  private static audioCtx: AudioContext | null = null;
 
   static init() {
     window.addEventListener('message', async (event) => {
@@ -14,7 +15,37 @@ export class BridgeManager {
         event.source?.postMessage({ type: responseType, ...data }, { targetOrigin: '*' });
       };
 
-      // ── SCANNER ───────────────────────────────────────────────────────────
+      // ── 1. HARDWARE AUDIO & INSTANT CHIME / BUZZ SYNTHESIZER ──────────────
+      if (type === '__apexapp_beep') {
+        const freq = payload?.frequency || 1200;
+        const dur = payload?.durationMs || 150;
+
+        // Instant zero-delay Web Audio playback (< 5ms)
+        this.playSynthesizedTone(freq, dur);
+
+        // Also notify hardware spooler / Win32 MessageBeep
+        invoke('play_system_beep', { frequency: freq, durationMs: dur }).catch(() => {});
+        return;
+      }
+
+      // ── 2. NATIVE DESKTOP NOTIFICATIONS ───────────────────────────────────
+      if (type === '__apexapp_notify') {
+        const title = payload?.title || 'ApexApp Alert';
+        const body = payload?.body || '';
+
+        try {
+          await invoke('show_system_notification', { title, body });
+          respond('__apexapp_notify_response', { success: true });
+        } catch (err: any) {
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification(title, { body });
+          }
+          respond('__apexapp_notify_response', { success: false, error: err?.message || err });
+        }
+        return;
+      }
+
+      // ── 3. SCANNER ────────────────────────────────────────────────────────
       if (type === '__apexapp_camera_scan_request') {
         await ScannerManager.startCameraScan();
         return;
@@ -24,7 +55,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── CASH DRAWER & PRINTER ─────────────────────────────────────────────
+      // ── 4. CASH DRAWER & PRINTER ──────────────────────────────────────────
       if (type === '__apexapp_get_printer') {
         const { id, name } = PrinterManager.getActivePrinter();
         respond('__apexapp_printer_state', { printerId: id, printerName: name });
@@ -44,7 +75,18 @@ export class BridgeManager {
         return;
       }
 
-      // ── MULTI-FORMAT FILE EXPORT ──────────────────────────────────────────
+      // ── 5. PRINT REQUEST ──────────────────────────────────────────────────
+      if (type === '__apexapp_print_request') {
+        try {
+          const savedPath = await PrinterManager.printPayload(payload || {});
+          respond('__apexapp_print_response', { success: true, savedPath });
+        } catch (err: any) {
+          respond('__apexapp_print_response', { success: false, error: err?.message || err });
+        }
+        return;
+      }
+
+      // ── 6. MULTI-FORMAT FILE EXPORT ───────────────────────────────────────
       if (type === '__apexapp_export_file') {
         try {
           const filePath: string = await invoke('export_file', { payload });
@@ -55,7 +97,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── BIOMETRICS / SUPERVISOR AUTH ──────────────────────────────────────
+      // ── 7. BIOMETRICS / SUPERVISOR AUTH ───────────────────────────────────
       if (type === '__apexapp_authenticate_biometrics') {
         try {
           const authenticated: boolean = await invoke('authenticate_biometrics', {
@@ -68,7 +110,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── KIOSK & FULLSCREEN ────────────────────────────────────────────────
+      // ── 8. KIOSK & FULLSCREEN ─────────────────────────────────────────────
       if (type === '__apexapp_set_kiosk') {
         try {
           await invoke('set_kiosk_mode', { enabled: Boolean(payload?.enabled) });
@@ -86,18 +128,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── HARDWARE BUZZER & BEEP ────────────────────────────────────────────
-      if (type === '__apexapp_beep') {
-        try {
-          await invoke('play_system_beep', {
-            frequency: payload?.frequency,
-            durationMs: payload?.durationMs,
-          });
-        } catch (_) {}
-        return;
-      }
-
-      // ── DIGITAL WEIGHING SCALE ────────────────────────────────────────────
+      // ── 9. SERIAL SCALE & POLE DISPLAY ────────────────────────────────────
       if (type === '__apexapp_read_scale') {
         try {
           const reading = await invoke('read_serial_scale', {
@@ -111,7 +142,6 @@ export class BridgeManager {
         return;
       }
 
-      // ── CUSTOMER POLE DISPLAY (VFD) ───────────────────────────────────────
       if (type === '__apexapp_pole_display') {
         try {
           await invoke('send_pole_display', {
@@ -126,7 +156,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── BATTERY & NETWORK STATUS ──────────────────────────────────────────
+      // ── 10. BATTERY & NETWORK TELEMETRY ───────────────────────────────────
       if (type === '__apexapp_get_battery') {
         try {
           const status = await invoke('get_battery_status');
@@ -143,7 +173,7 @@ export class BridgeManager {
         return;
       }
 
-      // ── WAKELOCK, NOTIFICATIONS, CLIPBOARD ────────────────────────────────
+      // ── 11. WAKELOCK & CLIPBOARD ──────────────────────────────────────────
       if (type === '__apexapp_set_wakelock') {
         const enabled = Boolean(payload?.enabled);
         if (enabled && 'wakeLock' in navigator) {
@@ -152,14 +182,6 @@ export class BridgeManager {
           await this.wakeLockSentinel.release();
           this.wakeLockSentinel = null;
         }
-        return;
-      }
-
-      if (type === '__apexapp_notify') {
-        await invoke('show_system_notification', {
-          title: payload?.title || 'ApexApp',
-          body: payload?.body || '',
-        });
         return;
       }
 
@@ -174,6 +196,40 @@ export class BridgeManager {
         return;
       }
     });
+  }
+
+  /**
+   * Zero-latency (< 5ms) Web Audio tone synthesizer:
+   * High pitches play a crisp bell chime, low pitches play an error buzz.
+   */
+  private static playSynthesizedTone(frequency: number, durationMs: number) {
+    try {
+      if (!this.audioCtx) {
+        this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+
+      const osc = this.audioCtx.createOscillator();
+      const gain = this.audioCtx.createGain();
+
+      // Lower frequencies (< 600Hz) use sawtooth for a raspy error buzz; higher ones use smooth sine
+      osc.type = frequency < 600 ? 'sawtooth' : 'sine';
+      osc.frequency.setValueAtTime(frequency, this.audioCtx.currentTime);
+
+      gain.gain.setValueAtTime(0.18, this.audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + durationMs / 1000);
+
+      osc.connect(gain);
+      gain.connect(this.audioCtx.destination);
+
+      osc.start();
+      osc.stop(this.audioCtx.currentTime + durationMs / 1000);
+    } catch (e) {
+      console.warn('Web Audio synthesis failed:', e);
+    }
   }
 
   static broadcast(message: object) {

@@ -3,34 +3,33 @@ use crate::models::ScaleReading;
 #[cfg(not(target_os = "windows"))]
 use std::io::{Read, Write};
 
-/// Emits an OS hardware frequency beep through system speakers (zero web audio lag)
-#[tauri::command]
-pub async fn play_system_beep(frequency: Option<u32>, duration_ms: Option<u32>) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let freq = frequency.unwrap_or(1200);
-        let dur = duration_ms.unwrap_or(150);
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn MessageBeep(uType: u32) -> i32;
+}
 
+/// Instant native hardware beep without starting any external process
+#[tauri::command]
+pub async fn play_system_beep(frequency: Option<u32>, _duration_ms: Option<u32>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
-        {
-            let script = format!("[console]::beep({}, {})", freq, dur);
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .spawn();
+        unsafe {
+            let u_type = if frequency.unwrap_or(1200) < 600 {
+                0x00000010 // MB_ICONHAND / Critical Error sound
+            } else {
+                0x00000040 // MB_ICONASTERISK / Asterisk Chime
+            };
+            MessageBeep(u_type);
         }
 
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("osascript")
-                .args(["-e", "beep 1"])
-                .spawn();
+            let _ = std::process::Command::new("osascript").args(["-e", "beep 1"]).spawn();
         }
 
         #[cfg(target_os = "linux")]
         {
-            // \x07 is the standard ASCII audible bell (BEL)
-            let _ = std::process::Command::new("sh")
-                .args(["-c", "echo -ne '\x07'"])
-                .spawn();
+            let _ = std::process::Command::new("sh").args(["-c", "echo -ne '\x07'"]).spawn();
         }
 
         Ok(())
@@ -41,7 +40,10 @@ pub async fn play_system_beep(frequency: Option<u32>, duration_ms: Option<u32>) 
 
 /// Reads weight data from a connected RS-232 / USB-to-Serial digital scale
 #[tauri::command]
-pub async fn read_serial_scale(port: String, baud_rate: Option<u32>) -> Result<ScaleReading, String> {
+pub async fn read_serial_scale(
+    port: String,
+    baud_rate: Option<u32>,
+) -> Result<ScaleReading, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let baud = baud_rate.unwrap_or(9600);
 
@@ -59,7 +61,7 @@ pub async fn read_serial_scale(port: String, baud_rate: Option<u32>) -> Result<S
                 port, baud
             );
 
-            let output = std::process::Command::new("powershell")
+            let output = crate::utils::silent_command("powershell")
                 .args(["-NoProfile", "-Command", &script])
                 .output()
                 .map_err(|e| format!("Scale read error: {}", e))?;
@@ -141,8 +143,12 @@ pub async fn send_pole_display(port: String, line1: String, line2: String) -> Re
             let temp_file = std::env::temp_dir().join("vfd_display.bin");
             std::fs::write(&temp_file, &payload).map_err(|e| e.to_string())?;
 
-            let script = format!("Copy-Item '{}' -Destination '\\\\.\\{}'", temp_file.display(), port);
-            let _ = std::process::Command::new("powershell")
+            let script = format!(
+                "Copy-Item '{}' -Destination '\\\\.\\{}'",
+                temp_file.display(),
+                port
+            );
+            let _ = crate::utils::silent_command("powershell")
                 .args(["-NoProfile", "-Command", &script])
                 .output();
 
