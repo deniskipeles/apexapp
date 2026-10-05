@@ -72,6 +72,7 @@ pub fn run() {
             commands::play_system_beep,
             commands::read_serial_scale,
             commands::send_pole_display,
+            commands::focus_main_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

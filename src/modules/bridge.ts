@@ -2,11 +2,42 @@ import { invoke } from '@tauri-apps/api/core';
 import { PrinterManager } from './printer';
 import { ScannerManager } from './scanner';
 
+export interface NotificationAction {
+  /** Target route within the tenant app (e.g. "/orders/1042", "/broadcasts") */
+  route?: string;
+  /** Section / Tab name */
+  section?: string;
+  /** Target entity ID */
+  id?: string | number;
+  /** Arbitrary metadata */
+  meta?: Record<string, any>;
+}
+
+export interface NotificationOptions {
+  /** Notification headline */
+  title: string;
+  /** Notification message */
+  body?: string;
+  /**
+   * Identifies which tenant/workspace owns this notification.
+   * Can be a Tenant ID (e.g. "org_bakery_01"), a subdomain ("joes-cafe"), or workspace ID.
+   */
+  tenantId?: string;
+  /** Optional icon or avatar URL / Base64 */
+  icon?: string;
+  /** Deep-link navigation metadata */
+  action?: NotificationAction;
+  /** Custom notification ID for deduplication */
+  id?: string;
+}
+
 export class BridgeManager {
   private static wakeLockSentinel: any = null;
   private static audioCtx: AudioContext | null = null;
 
   static init() {
+    this.setupNotificationClickListeners();
+
     window.addEventListener('message', async (event) => {
       const { type, payload } = event.data || {};
       if (!type || !type.startsWith('__apexapp_')) return;
@@ -15,33 +46,88 @@ export class BridgeManager {
         event.source?.postMessage({ type: responseType, ...data }, { targetOrigin: '*' });
       };
 
+      // ── DEVICE INFO QUERY (DESKTOP) ───────────────────────────────────────
+      if (type === '__apexapp_get_device_info') {
+        try {
+          const sys: any = await invoke('get_platform_info');
+          const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+          respond('__apexapp_device_info', {
+            info: {
+              client: 'desktop',
+              platform: sys.platform || 'windows',
+              formFactor: 'desktop',
+              osVersion: sys.os_version,
+              arch: sys.arch,
+              deviceModel: sys.hostname,
+              appVersion: sys.app_version,
+              screen: {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                pixelRatio: window.devicePixelRatio || 1,
+              },
+              capabilities: {
+                hasHardwarePrinter: true,
+                hasCashDrawer: true,
+                hasSerialScale: true,
+                hasPoleDisplay: true,
+                hasCameraScanner: true,
+                hasUsbScanner: true,
+                hasHaptics: false,
+                hasBiometrics: true,
+                hasBattery: false,
+                hasTouch: isTouch,
+              },
+            },
+          });
+        } catch (_) {
+          respond('__apexapp_device_info', {
+            info: {
+              client: 'desktop',
+              platform: 'windows',
+              formFactor: 'desktop',
+              screen: { width: window.innerWidth, height: window.innerHeight, pixelRatio: 1 },
+              capabilities: {
+                hasHardwarePrinter: true,
+                hasCashDrawer: true,
+                hasSerialScale: true,
+                hasPoleDisplay: true,
+                hasCameraScanner: true,
+                hasUsbScanner: true,
+                hasHaptics: false,
+                hasBiometrics: true,
+                hasBattery: false,
+                hasTouch: false,
+              },
+            },
+          });
+        }
+        return;
+      }
+
       // ── 1. HARDWARE AUDIO & INSTANT CHIME / BUZZ SYNTHESIZER ──────────────
       if (type === '__apexapp_beep') {
         const freq = payload?.frequency || 1200;
         const dur = payload?.durationMs || 150;
 
-        // Instant zero-delay Web Audio playback (< 5ms)
         this.playSynthesizedTone(freq, dur);
-
-        // Also notify hardware spooler / Win32 MessageBeep
         invoke('play_system_beep', { frequency: freq, durationMs: dur }).catch(() => {});
         return;
       }
 
-      // ── 2. NATIVE DESKTOP NOTIFICATIONS ───────────────────────────────────
+      // ── 2. NATIVE DESKTOP NOTIFICATIONS WITH TARGET TENANT RESOLUTION ─────
       if (type === '__apexapp_notify') {
-        const title = payload?.title || 'ApexApp Alert';
-        const body = payload?.body || '';
+        const notif: NotificationOptions = {
+          title: payload?.title || 'ApexApp Alert',
+          body: payload?.body || '',
+          tenantId: payload?.tenantId,
+          icon: payload?.icon,
+          action: payload?.action,
+          id: payload?.id,
+        };
 
-        try {
-          await invoke('show_system_notification', { title, body });
-          respond('__apexapp_notify_response', { success: true });
-        } catch (err: any) {
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification(title, { body });
-          }
-          respond('__apexapp_notify_response', { success: false, error: err?.message || err });
-        }
+        this.dispatchDesktopNotification(notif);
+        respond('__apexapp_notify_response', { success: true });
         return;
       }
 
@@ -198,10 +284,122 @@ export class BridgeManager {
     });
   }
 
-  /**
-   * Zero-latency (< 5ms) Web Audio tone synthesizer:
-   * High pitches play a crisp bell chime, low pitches play an error buzz.
-   */
+  // ── DESKTOP NOTIFICATION CLICK RESOLUTION ─────────────────────────────────
+  static resolveNotificationClick(notif: NotificationOptions) {
+    // 1. Unminimize and focus main desktop window
+    invoke('focus_main_window').catch(() => {});
+    window.focus();
+
+    // 2. Switch to the tenant App view (#view-app) if on Settings or Dashboard
+    const viewApp = document.querySelector('#view-app') as HTMLElement;
+    const viewDash = document.querySelector('#view-dash') as HTMLElement;
+    const viewSettings = document.querySelector('#view-settings') as HTMLElement;
+    const navSettingsBtn = document.querySelector('#nav-settings-btn') as HTMLElement;
+
+    if (viewApp && !viewApp.classList.contains('active')) {
+      viewApp.classList.add('active');
+      viewDash?.classList.remove('active');
+      viewSettings?.classList.remove('active');
+      navSettingsBtn?.classList.remove('active');
+    }
+
+    // 3. Dispatch deep-link action to the tenant iframe
+    if (notif.action) {
+      const frameApp = document.querySelector('#frame-app') as HTMLIFrameElement;
+      frameApp?.contentWindow?.postMessage(
+        {
+          type: '__apexapp_notification_action',
+          action: notif.action,
+        },
+        '*'
+      );
+    }
+  }
+
+  // ── DESKTOP NOTIFICATION SENDER ───────────────────────────────────────────
+  private static async dispatchDesktopNotification(notif: NotificationOptions) {
+    // 1. Interactive Desktop In-App Toast
+    this.showInAppToast(notif);
+
+    // 2. Tauri v2 Plugin Notification (calls OS Notification Center)
+    const tauriObj = (window as any).__TAURI__;
+    if (tauriObj?.notification?.sendNotification) {
+      try {
+        await tauriObj.notification.sendNotification({
+          title: notif.title,
+          body: notif.body || '',
+          extra: {
+            tenantId: notif.tenantId,
+            action: notif.action,
+          },
+        });
+        return;
+      } catch (_) {}
+    }
+
+    // 3. Web Notification API with direct .onclick resolution
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(notif.title, {
+        body: notif.body,
+        icon: notif.icon || '/src/assets/apex.svg',
+        data: notif,
+      });
+
+      n.onclick = (e) => {
+        e.preventDefault();
+        this.resolveNotificationClick(notif);
+      };
+    } else {
+      // Direct Rust show_system_notification command fallback
+      invoke('show_system_notification', {
+        title: notif.title,
+        body: notif.body || '',
+      }).catch(() => {});
+    }
+  }
+
+  private static setupNotificationClickListeners() {
+    const tauriObj = (window as any).__TAURI__;
+    if (tauriObj?.notification?.onAction) {
+      tauriObj.notification.onAction((notification: any) => {
+        const extra = notification?.extra || {};
+        this.resolveNotificationClick({
+          title: notification.title,
+          body: notification.body,
+          tenantId: extra.tenantId,
+          action: typeof extra.action === 'string' ? JSON.parse(extra.action) : extra.action,
+        });
+      });
+    }
+  }
+
+  private static showInAppToast(notif: NotificationOptions) {
+    let container = document.getElementById('desktop-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'desktop-toast-container';
+      container.className = 'desktop-toast-container';
+      document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = 'desktop-toast-banner';
+    toast.innerHTML = `
+      <div style="font-weight:700;font-size:0.85rem;color:#0f172a;margin-bottom:2px;">${escapeHtml(notif.title)}</div>
+      ${notif.body ? `<div style="font-size:0.78rem;color:#475569;">${escapeHtml(notif.body)}</div>` : ''}
+    `;
+
+    toast.addEventListener('click', () => {
+      toast.remove();
+      this.resolveNotificationClick(notif);
+    });
+
+    container.appendChild(toast);
+    setTimeout(() => {
+      if (toast.parentElement) toast.remove();
+    }, 4500);
+  }
+
   private static playSynthesizedTone(frequency: number, durationMs: number) {
     try {
       if (!this.audioCtx) {
@@ -215,7 +413,6 @@ export class BridgeManager {
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
 
-      // Lower frequencies (< 600Hz) use sawtooth for a raspy error buzz; higher ones use smooth sine
       osc.type = frequency < 600 ? 'sawtooth' : 'sine';
       osc.frequency.setValueAtTime(frequency, this.audioCtx.currentTime);
 
@@ -239,4 +436,8 @@ export class BridgeManager {
     ];
     frames.forEach((f) => f?.contentWindow?.postMessage(message, '*'));
   }
+}
+
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

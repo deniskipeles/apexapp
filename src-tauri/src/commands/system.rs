@@ -1,7 +1,39 @@
-use crate::models::{BatteryStatus, NetworkStatus};
+use crate::models::{BatteryStatus, NetworkStatus, PlatformInfo};
 use crate::utils::base64_decode;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
+
+
+/// Returns low-level OS platform and architecture details for device detection
+#[tauri::command]
+pub fn get_platform_info(app: tauri::AppHandle) -> Result<PlatformInfo, String> {
+    let platform = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    }.to_string();
+
+    let arch = std::env::consts::ARCH.to_string();
+    let app_version = app.package_info().version.to_string();
+
+    let hostname = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "Desktop-PC".to_string());
+
+    let os_version = std::env::var("OS").unwrap_or_else(|_| "".to_string());
+
+    Ok(PlatformInfo {
+        platform,
+        arch,
+        os_version,
+        hostname,
+        app_version,
+    })
+}
 
 #[tauri::command]
 pub fn greet(name: &str) -> String {
@@ -316,5 +348,18 @@ pub async fn reset_app_name(app: AppHandle, window: WebviewWindow) -> Result<(),
     }
 
     window.set_title("ApexApp").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Forces the main desktop window into focus when an action banner is clicked
+#[tauri::command]
+pub fn focus_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     Ok(())
 }

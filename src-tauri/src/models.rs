@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PlatformInfo {
+    pub platform: String,
+    pub arch: String,
+    pub os_version: String,
+    pub hostname: String,
+    pub app_version: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EnvVar {
     pub key: String,

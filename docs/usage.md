@@ -14,6 +14,60 @@ Save this file directly into your web project (e.g. `src/lib/apexapp.ts` or `src
 // src/lib/apexapp.ts
 
 /**
+ * Operating system and hardware capability flags for building device-agnostic UIs.
+ */
+export interface DeviceCapabilities {
+  /** True if direct hardware print spooling (thermal/office) is available */
+  hasHardwarePrinter: boolean;
+  /** True if an RJ11/RJ12 cash drawer solenoid is connected */
+  hasCashDrawer: boolean;
+  /** True if RS-232 / USB digital scale polling is available */
+  hasSerialScale: boolean;
+  /** True if customer-facing 2-line VFD pole display is supported */
+  hasPoleDisplay: boolean;
+  /** True if optical camera scanning is available (webcam or mobile camera) */
+  hasCameraScanner: boolean;
+  /** True if physical USB / wireless barcode gun wedge listener is available */
+  hasUsbScanner: boolean;
+  /** True if tactile haptic vibration motor is present */
+  hasHaptics: boolean;
+  /** True if biometric or supervisor credential verification is supported */
+  hasBiometrics: boolean;
+  /** True if device has a battery power source */
+  hasBattery: boolean;
+  /** True if touchscreen input is detected */
+  hasTouch: boolean;
+}
+
+/**
+ * Comprehensive device environment details returned by the host shell.
+ */
+export interface DeviceInfo {
+  /** Host shell type: 'desktop' (ApexApp) | 'mobile' (ApexClient) | 'browser' (Fallback) */
+  client: 'desktop' | 'mobile' | 'browser';
+  /** Operating system platform */
+  platform: 'windows' | 'macos' | 'linux' | 'android' | 'ios' | 'unknown';
+  /** Form factor categorization */
+  formFactor: 'desktop' | 'mobile' | 'tablet' | 'kiosk';
+  /** Operating system version */
+  osVersion?: string;
+  /** CPU Architecture ('x86_64' | 'aarch64' | 'armv7' | etc.) */
+  arch?: string;
+  /** Hostname or device model */
+  deviceModel?: string;
+  /** Host shell application version (e.g. '0.1.0') */
+  appVersion?: string;
+  /** Viewport and display pixel metrics */
+  screen: {
+    width: number;
+    height: number;
+    pixelRatio: number;
+  };
+  /** Hardware capability flags */
+  capabilities: DeviceCapabilities;
+}
+
+/**
  * Represents the current connection state of the hardware receipt printer.
  */
 export interface PrinterState {
@@ -154,10 +208,144 @@ export interface ScanResult {
  */
 export type HapticStyle = 'light' | 'medium' | 'heavy' | 'success' | 'error';
 
+export interface NotificationAction {
+  /** Target route within the tenant app (e.g. "/orders/1042", "/broadcasts") */
+  route?: string;
+  /** Section / Tab name */
+  section?: string;
+  /** Target entity ID */
+  id?: string | number;
+  /** Arbitrary metadata */
+  meta?: Record<string, any>;
+}
+
+export interface NotificationOptions {
+  /** Notification headline */
+  title: string;
+  /** Notification message */
+  body?: string;
+  /**
+   * Identifies which tenant/workspace owns this notification.
+   * Can be a Tenant ID (e.g. "org_bakery_01"), a subdomain ("joes-cafe"), or workspace ID.
+   */
+  tenantId?: string;
+  /** Optional icon or avatar URL / Base64 */
+  icon?: string;
+  /** Deep-link navigation metadata */
+  action?: NotificationAction;
+  /** Custom notification ID for deduplication */
+  id?: string;
+}
+
+export interface PollRegistrationOptions {
+  /** Relative endpoint or absolute URL returning an array of NotificationOptions (e.g. "/api/notifications/poll") */
+  endpoint: string;
+  /** Optional headers (such as Authorization Bearer tokens) */
+  headers?: Record<string, string>;
+}
+
+
 /**
  * Unified bridge client for communicating with ApexApp Desktop and ApexClient Mobile.
  */
 export class ApexAppBridge {
+  /**
+   * Queries comprehensive device and hardware capabilities from the host shell.
+   * Enables responsive, device-agnostic UI adaptations (mobile vs desktop layouts, hardware buttons).
+   *
+   * @returns Promise resolving to the complete DeviceInfo model.
+   *
+   * @example
+   * ```typescript
+   * const device = await ApexAppBridge.getDeviceInfo();
+   * if (device.client === 'mobile') {
+   *   // Render bottom sheets, touch-friendly rows, and camera scanner
+   * } else {
+   *   // Render dense desktop tables, cash drawer buttons, and serial scale widgets
+   * }
+   * ```
+   */
+  static getDeviceInfo(): Promise<DeviceInfo> {
+    return new Promise((resolve) => {
+      // Fallback if running outside ApexApp in a standard standalone browser
+      if (!this.isInsideApexApp()) {
+        const ua = navigator.userAgent.toLowerCase();
+        const isMobile = /android|iphone|ipad|ipod/.test(ua);
+        const isTablet = /ipad|tablet/.test(ua) || (isMobile && window.innerWidth >= 768);
+
+        return resolve({
+          client: 'browser',
+          platform: ua.includes('win')
+            ? 'windows'
+            : ua.includes('mac')
+            ? 'macos'
+            : ua.includes('linux')
+            ? 'linux'
+            : ua.includes('android')
+            ? 'android'
+            : ua.includes('iphone') || ua.includes('ipad')
+            ? 'ios'
+            : 'unknown',
+          formFactor: isTablet ? 'tablet' : isMobile ? 'mobile' : 'desktop',
+          screen: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            pixelRatio: window.devicePixelRatio || 1,
+          },
+          capabilities: {
+            hasHardwarePrinter: false,
+            hasCashDrawer: false,
+            hasSerialScale: false,
+            hasPoleDisplay: false,
+            hasCameraScanner: true,
+            hasUsbScanner: false,
+            hasHaptics: 'vibrate' in navigator,
+            hasBiometrics: false,
+            hasBattery: 'getBattery' in navigator,
+            hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0,
+          },
+        });
+      }
+
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === '__apexapp_device_info' && event.data.info) {
+          window.removeEventListener('message', handler);
+          resolve(event.data.info);
+        }
+      };
+
+      window.addEventListener('message', handler);
+      window.parent.postMessage({ type: '__apexapp_get_device_info' }, '*');
+
+      // 1.5s fallback timeout
+      setTimeout(() => {
+        window.removeEventListener('message', handler);
+        resolve({
+          client: 'desktop',
+          platform: 'unknown',
+          formFactor: 'desktop',
+          screen: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+            pixelRatio: window.devicePixelRatio || 1,
+          },
+          capabilities: {
+            hasHardwarePrinter: true,
+            hasCashDrawer: true,
+            hasSerialScale: true,
+            hasPoleDisplay: true,
+            hasCameraScanner: true,
+            hasUsbScanner: true,
+            hasHaptics: false,
+            hasBiometrics: true,
+            hasBattery: false,
+            hasTouch: false,
+          },
+        });
+      }, 1500);
+    });
+  }
+  
   /**
    * Checks if the web app is running inside the ApexApp desktop wrapper or ApexClient mobile iframe.
    * @returns true if running embedded inside an ApexApp shell, false if in a regular standalone browser.
@@ -348,7 +536,11 @@ export class ApexAppBridge {
   static readScale(options?: ScaleOptions): Promise<ScaleResult> {
     return new Promise((resolve) => {
       if (!this.isInsideApexApp()) {
-        return resolve({ success: false, raw: 'Scale bridge requires desktop host', stable: false });
+        return resolve({
+          success: false,
+          raw: 'Scale bridge requires desktop host',
+          stable: false,
+        });
       }
 
       const handler = (event: MessageEvent) => {
@@ -588,23 +780,81 @@ export class ApexAppBridge {
 
   /**
    * Displays an operating system desktop or mobile push toast notification.
+   * Dispatches a rich notification banner with system chime, vibration, and deep-link payload.
    * @param title Header title of the notification banner.
    * @param body Descriptive text content.
    */
-  static notify(title: string, body = ''): void {
+  static notify(options: NotificationOptions): void {
     if (!this.isInsideApexApp()) {
       if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(title, { body });
+        new Notification(options.title, { body: options.body });
       }
       return;
     }
     window.parent.postMessage(
       {
         type: '__apexapp_notify',
-        payload: { title, body },
+        payload: options,
       },
       '*'
     );
+  }
+
+  /**
+   * Registers a 5-second background polling endpoint for this workspace in ApexClient.
+   * The shell queries this endpoint even when the iframe is in the background.
+   *
+   * @example
+   * ```typescript
+   * ApexAppBridge.registerNotificationPoll({
+   *   endpoint: '/api/notifications/poll',
+   *   headers: { 'Authorization': 'Bearer <token>' }
+   * });
+   * ```
+   */
+  static registerNotificationPoll(options: PollRegistrationOptions): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!this.isInsideApexApp()) return resolve(false);
+
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === '__apexapp_register_notification_poll_response') {
+          window.removeEventListener('message', handler);
+          resolve(Boolean(event.data.success));
+        }
+      };
+
+      window.addEventListener('message', handler);
+      window.parent.postMessage(
+        {
+          type: '__apexapp_register_notification_poll',
+          payload: options,
+        },
+        '*'
+      );
+    });
+  }
+
+  /**
+   * Subscribes to deep-link notification actions triggered when the operator clicks a notification
+   * action inside the ApexClient Notification Center.
+   *
+   * @example
+   * ```typescript
+   * const unbind = ApexAppBridge.onNotificationAction((action) => {
+   *   if (action.route) {
+   *     router.push(action.route); // Navigate React / Vue router
+   *   }
+   * });
+   * ```
+   */
+  static onNotificationAction(callback: (action: NotificationAction) => void): () => void {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === '__apexapp_notification_action' && event.data.action) {
+        callback(event.data.action);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
   }
 
   // ── 6. TELEMETRY & CLIPBOARD ──────────────────────────────────────────────
@@ -672,7 +922,10 @@ export class ApexAppBridge {
   static readClipboard(): Promise<string> {
     return new Promise((resolve) => {
       if (!this.isInsideApexApp()) {
-        navigator.clipboard?.readText().then(resolve).catch(() => resolve(''));
+        navigator.clipboard
+          ?.readText()
+          .then(resolve)
+          .catch(() => resolve(''));
         return;
       }
 
@@ -1354,3 +1607,128 @@ For static HTML pages served directly by ApexKit without build systems or bundli
 ### Universal File Exporting
 * Pass Base64 data cleanly (with or without `data:*/*;base64,` prefix). The host decodes the bytes directly.
 * Specify `autoOpen: true` for audit spreadsheets or customer receipts so Microsoft Excel or Adobe Acrobat opens the exported file immediately.
+
+---
+
+# Designing a Device-Agnostic UI (React Example)
+
+Here is a practical example showing how to build an interface that dynamically adapts between a handheld mobile view and a desktop workstation based on `getDeviceInfo()`:
+
+```tsx
+// src/components/DeviceAgnosticPOS.tsx
+import React, { useState, useEffect } from 'react';
+import { ApexAppBridge, DeviceInfo } from '../lib/apexapp';
+
+export default function DeviceAgnosticPOS() {
+  const [device, setDevice] = useState<DeviceInfo | null>(null);
+
+  useEffect(() => {
+    ApexAppBridge.getDeviceInfo().then((info) => {
+      setDevice(info);
+      console.log('Detected Device Environment:', info);
+    });
+  }, []);
+
+  if (!device) {
+    return <div style={{ padding: 20 }}>Detecting device capabilities...</div>;
+  }
+
+  // ── 1. MOBILE SMARTPHONE LAYOUT ───────────────────────────────────────────
+  if (device.formFactor === 'mobile') {
+    return (
+      <div style={{ padding: 16, fontFamily: 'system-ui, sans-serif' }}>
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2>📱 Mobile Register</h2>
+          <span style={{ fontSize: '0.75rem', background: '#e0e7ff', padding: '4px 8px', borderRadius: 12 }}>
+            {device.platform.toUpperCase()}
+          </span>
+        </header>
+
+        {/* Mobile-centric card deck */}
+        <div style={{ margin: '20px 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <button
+            onClick={() => ApexAppBridge.requestCameraScan()}
+            style={{ padding: 16, fontSize: '1rem', background: '#2563eb', color: 'white', borderRadius: 12, border: 'none' }}
+          >
+            📷 Tap to Scan Barcode
+          </button>
+
+          <button
+            onClick={() => {
+              ApexAppBridge.haptic('success');
+              ApexAppBridge.notify('Order Placed', 'Order #104 sent to kitchen');
+            }}
+            style={{ padding: 16, fontSize: '1rem', background: '#10b981', color: 'white', borderRadius: 12, border: 'none' }}
+          >
+            ✓ Complete Mobile Sale
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 2. DESKTOP WORKSTATION / TABLET LAYOUT ────────────────────────────────
+  return (
+    <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: 12 }}>
+        <div>
+          <h2>🖥️ High-Volume POS Workstation</h2>
+          <p style={{ margin: '4px 0 0', color: '#64748b', fontSize: '0.85rem' }}>
+            Running on {device.platform.toUpperCase()} ({device.arch}) | Screen: {device.screen.width}×{device.screen.height}
+          </p>
+        </div>
+
+        {/* Dynamic capability badges */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {device.capabilities.hasHardwarePrinter && <span style={badgeStyle}>🖨️ Thermal Printer</span>}
+          {device.capabilities.hasCashDrawer && <span style={badgeStyle}>💵 Cash Drawer</span>}
+          {device.capabilities.hasSerialScale && <span style={badgeStyle}>⚖️ Scale Ready</span>}
+        </div>
+      </header>
+
+      {/* Two-column layout for desktop monitors */}
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20, marginTop: 20 }}>
+        <div>
+          <h3>Checkout Items</h3>
+          <p>Scan items using your handheld USB laser gun (background listening active).</p>
+        </div>
+
+        <div style={{ background: '#f8fafc', padding: 16, borderRadius: 12, border: '1px solid #e2e8f0' }}>
+          <h3>Total: $42.50</h3>
+
+          {/* Render POS hardware actions ONLY if device supports them */}
+          {device.capabilities.hasCashDrawer && (
+            <button
+              onClick={() => ApexAppBridge.openCashDrawer({ pin: 2 })}
+              style={{ width: '100%', padding: 12, background: '#0f172a', color: 'white', borderRadius: 8, marginBottom: 8 }}
+            >
+              Open Cash Drawer
+            </button>
+          )}
+
+          {device.capabilities.hasSerialScale && (
+            <button
+              onClick={async () => {
+                const scale = await ApexAppBridge.readScale({ port: 'COM1' });
+                alert(`Scale: ${scale.weight} ${scale.unit}`);
+              }}
+              style={{ width: '100%', padding: 12, background: '#2563eb', color: 'white', borderRadius: 8 }}
+            >
+              Poll Digital Scale
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const badgeStyle: React.CSSProperties = {
+  background: '#f1f5f9',
+  color: '#334155',
+  fontSize: '0.75rem',
+  padding: '4px 10px',
+  borderRadius: 6,
+  fontWeight: 600,
+};
+```
